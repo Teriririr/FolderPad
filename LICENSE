@@ -1,0 +1,97 @@
+FolderPad 非商业许可证 v1.0
+FolderPad Non-Commercial License v1.0
+=============================================================
+
+版权所有 (c) 2026 Teriririr（GitHub: @Teriririr）
+Copyright (c) 2026 Teriririr (GitHub: @Teriririr)
+
+本许可证适用于 FolderPad 项目的全部内容，包括源代码、脚本、文档、
+图片与其它随附文件（以下统称"本软件"）。
+
+This license applies to all contents of the FolderPad project, including
+source code, scripts, documentation, images and any other accompanying
+files (collectively, "the Software").
+
+-------------------------------------------------------------
+一、授权（Grant）
+-------------------------------------------------------------
+
+在遵守本许可证全部条款的前提下，任何人可免费获得一项非排他、全球范围、
+免版税的许可，可以：
+
+  1. 使用、运行本软件；
+  2. 复制、分发本软件的原样副本；
+  3. 修改本软件，并分发修改后的版本；
+  4. 将本软件用于个人学习、研究、教学、非营利的开源项目。
+
+以上权利的前提是：你必须在所有副本与修改版中**完整保留**本许可证全文
+以及上述版权声明，并注明是否做过修改。
+
+Subject to all terms of this license, you are granted a free, non-exclusive,
+worldwide, royalty-free license to use, run, copy, distribute and modify the
+Software for personal, educational, research and non-commercial open-source
+purposes, provided that this license and the copyright notice above are
+retained in full in all copies and modified versions, and that any
+modification is clearly indicated.
+
+-------------------------------------------------------------
+二、禁止商业使用（Non-Commercial Restriction）
+-------------------------------------------------------------
+
+**你不得将本软件用于任何商业用途。** "商业用途"包括但不限于：
+
+  1. 出售、出租、许可本软件或其修改版，或对其收费；
+  2. 将本软件（含修改版）集成、捆绑进任何付费产品或付费服务；
+  3. 以本软件为基础提供收费的技术支持、定制开发或托管服务；
+  4. 在营利性组织内，将本软件用于其业务运营、生产流程或对外交付；
+  5. 通过本软件直接或间接获取商业利益或金钱报酬。
+
+**You may not use the Software for any commercial purpose.** "Commercial
+purpose" includes, without limitation: selling, renting or licensing the
+Software or a modified version; bundling it into any paid product or paid
+service; offering paid support, customization or hosting based on it;
+using it for business operations, production workflows or client delivery
+inside a for-profit organization; or otherwise obtaining commercial
+advantage or monetary compensation through it.
+
+如需商业授权，请通过项目仓库的 Issue 与作者联系。
+For commercial licensing, please contact the author via the project's
+issue tracker.
+
+-------------------------------------------------------------
+三、无担保（No Warranty）
+-------------------------------------------------------------
+
+本软件按"现状"提供，不附带任何明示或默示的担保，包括但不限于对适销性、
+特定用途适用性和非侵权性的担保。在任何情况下，作者或版权持有人均不对
+因本软件或本软件的使用或其它交易而产生的任何索赔、损害或其它责任负责，
+无论是合同之诉、侵权之诉还是其它。
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------
+四、终止（Termination）
+-------------------------------------------------------------
+
+你违反本许可证任一条款时，本许可证授予你的全部权利立即终止。
+You rights under this license terminate automatically if you breach any
+term of this license.
+
+-------------------------------------------------------------
+五、其它（Miscellaneous）
+-------------------------------------------------------------
+
+本许可证不授予任何商标或名称的使用权（"FolderPad" 名称与相关标识除外，
+仅可用于如实说明来源）。
+No trademark or name rights are granted, except that the name "FolderPad"
+may be used to factually refer to the origin of the Software.
+
+本许可证的中文与英文版本具同等效力；如有冲突，以中文版本为准。
+The Chinese and English versions are equally authentic; in case of conflict,
+the Chinese version prevails.

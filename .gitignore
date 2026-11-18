@@ -1,0 +1,15 @@
+# 运行产物（程序不写仓库目录，这里只是保险）
+*.log
+*.tmp
+pads.json
+pads.bak
+hidden-backup.txt
+clean-exit
+pending.txt
+
+# Windows / 编辑器
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
