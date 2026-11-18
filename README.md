@@ -22,6 +22,12 @@
 
 下载后解压到**任意目录**（建议放在非桌面位置，比如 `D:\Program\FolderPad`），双击 `安装与自检.cmd` → 选 `1` 安装即可。
 
+懒得点？在 PowerShell 里粘这一行，直接把最新版拉到桌面：
+
+```powershell
+$z="$env:TEMP\FolderPad.zip"; Invoke-WebRequest 'https://github.com/Teriririr/FolderPad/releases/latest/download/FolderPad-v1.0.0.zip' -OutFile $z; Expand-Archive $z "$env:USERPROFILE\Desktop\FolderPad" -Force; Start-Process "$env:USERPROFILE\Desktop\FolderPad"
+```
+
 ---
 
 ## 它解决什么问题
