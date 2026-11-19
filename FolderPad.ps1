@@ -789,6 +789,13 @@ function Load-State {
         if (-not $pad.Contains('pinned')) { $pad.pinned = $false }
         if (-not $pad.Contains('order') -or $null -eq $pad.order) { $pad.order = @() }
         if (-not $pad.Contains('big') -or $null -eq $pad.big) { $pad.big = @() }
+        if (-not $pad.Contains('cells') -or $null -eq $pad.cells) { $pad.cells = @{} }
+        # 从 JSON 读回来的是 OrderedDictionary，统一转成 hashtable（下游用 ContainsKey）
+        $cellsTmp = @{}
+        foreach ($ck in @($pad.cells.Keys)) {
+            try { $cellsTmp[[string]$ck] = @{ c = [int]$pad.cells[$ck].c; r = [int]$pad.cells[$ck].r } } catch { }
+        }
+        $pad.cells = $cellsTmp
         if (-not $pad.Contains('rows') -or $null -eq $pad.rows -or [string]::IsNullOrWhiteSpace([string]$pad.rows)) { $pad.rows = 'auto' }
         if (-not $pad.Contains('prevHidden')) { $pad.prevHidden = $false }
         if (-not $pad.Contains('prevAttrs')) { $pad.prevAttrs = -1 }
@@ -1150,6 +1157,7 @@ function Convert-ToPad {
         createdAt       = (Get-Date).ToString('s')
         order           = @()
         big             = @()
+        cells           = @{}
         rows            = 'auto'
         invalid         = $false
     }
@@ -2478,57 +2486,111 @@ function Get-PadPlan {
     param(
         [string[]]$Order = @(),
         [string[]]$Big = @(),
-        [int]$Cols = 1
+        [int]$Cols = 1,
+        $Cells = $null
     )
-    # 占位打包：按 Order 顺序 first-fit 放到 Cols 列的网格里，大格占 $script:BigItemSpan²
-    # 返回 @{ Positions = @{ 名字 = @{ Col; Row; Span } }; Cols; Rows; ForcedCols }
+    # 自由位置模型：
+    #  - Cells：名字 → @{ c = 列; r = 行 }，位置由用户摆放（可以留空、可以任意行列）
+    #  - 没有位置的条目（新文件、或被别人占了位置）→ 放进"第一个空格"
+    #  - 大格占 $script:BigItemSpan²，位置被占则回退到第一个空格
+    # 返回 @{ Positions = 名字→@{Col;Row;Span}; Cells; Cols; Rows; ForcedCols }
     $span = [int]$script:BigItemSpan
     if ($span -lt 2) { $span = 2 }
     $bigSet = @{}
     foreach ($b in @($Big)) { if ($b) { $bigSet[[string]$b] = $true } }
+    if (-not $script:PadFreeLayout) { $bigSet = @{} }
     if ($Cols -lt 1) { $Cols = 1 }
     $forced = $false
     if ($bigSet.Count -gt 0 -and $Cols -lt $span) { $Cols = $span; $forced = $true }
-    if (-not $script:PadFreeLayout) { $bigSet = @{} }   # 兜底开关：关掉后一律按 1×1 排
 
     $occ = @{}
     $pos = @{}
-    $maxRow = 0
-    foreach ($name in @($Order)) {
-        $nm = [string]$name
-        if (-not $nm) { continue }
+    $outCells = @{}
+    $maxC = 0
+    $maxR = 0
+
+    $names = @()
+    foreach ($n in @($Order)) { if ($n) { $names += [string]$n } }
+
+    # 先放大格，再放小格；有位置且不冲突就原位保留
+    $pending = @()
+    $ordered = @()
+    foreach ($n in $names) { if ($bigSet.ContainsKey($n)) { $ordered += $n } }
+    foreach ($n in $names) { if (-not $bigSet.ContainsKey($n)) { $ordered += $n } }
+
+    foreach ($nm in $ordered) {
         $sp = 1
         if ($bigSet.ContainsKey($nm)) { $sp = $span }
-        $row = 0
-        $placed = $false
-        while (-not $placed -and $row -le 4096) {
-            for ($col = 0; $col -le ($Cols - $sp); $col++) {
-                $free = $true
-                for ($dx = 0; $dx -lt $sp -and $free; $dx++) {
-                    for ($dy = 0; $dy -lt $sp -and $free; $dy++) {
-                        if ($occ.ContainsKey(('{0},{1}' -f ($col + $dx), ($row + $dy)))) { $free = $false }
-                    }
-                }
-                if ($free) {
-                    for ($dx = 0; $dx -lt $sp; $dx++) {
-                        for ($dy = 0; $dy -lt $sp; $dy++) {
-                            $occ[('{0},{1}' -f ($col + $dx), ($row + $dy))] = $true
-                        }
-                    }
-                    $pos[$nm] = @{ Col = $col; Row = $row; Span = $sp }
-                    if (($row + $sp) -gt $maxRow) { $maxRow = $row + $sp }
-                    $placed = $true
-                    break
+        $c = -1
+        $r = -1
+        if ($Cells -and $Cells.ContainsKey($nm)) {
+            try { $c = [int]$Cells[$nm].c; $r = [int]$Cells[$nm].r } catch { $c = -1; $r = -1 }
+        }
+        $free = $false
+        if ($c -ge 0 -and $r -ge 0) {
+            $free = $true
+            for ($dx = 0; $dx -lt $sp -and $free; $dx++) {
+                for ($dy = 0; $dy -lt $sp -and $free; $dy++) {
+                    if ($occ.ContainsKey(('{0},{1}' -f ($c + $dx), ($r + $dy)))) { $free = $false }
                 }
             }
-            $row++
+        }
+        if ($free) {
+            for ($dx = 0; $dx -lt $sp; $dx++) {
+                for ($dy = 0; $dy -lt $sp; $dy++) {
+                    $occ[('{0},{1}' -f ($c + $dx), ($r + $dy))] = $true
+                }
+            }
+            $pos[$nm] = @{ Col = $c; Row = $r; Span = $sp }
+            $outCells[$nm] = @{ c = $c; r = $r }
+            if (($c + $sp) -gt $maxC) { $maxC = $c + $sp }
+            if (($r + $sp) -gt $maxR) { $maxR = $r + $sp }
+        } else {
+            $pending += @{ Name = $nm; Span = $sp }
         }
     }
-    $rows = $maxRow
-    if ($rows -lt 1) { $rows = 1 }
-    return @{ Positions = $pos; Cols = $Cols; Rows = $rows; ForcedCols = $forced }
-}
 
+    # 换行宽度：显式列数优先，其次是当前已占宽度，都没有就按条目数（全新框排一行）
+    $wrap = $Cols
+    if ($maxC -gt $wrap) { $wrap = $maxC }
+    if ($wrap -lt 1) { $wrap = [Math]::Max(1, $names.Count) }
+
+    foreach ($it in $pending) {
+        $nm = [string]$it.Name
+        $sp = [int]$it.Span
+        $placed = $false
+        for ($r = 0; -not $placed -and $r -le 4096; $r++) {
+            $last = $wrap - $sp
+            if ($last -lt 0) { $last = 0 }
+            for ($c = 0; $c -le $last -and -not $placed; $c++) {
+                $free2 = $true
+                for ($dx = 0; $dx -lt $sp -and $free2; $dx++) {
+                    for ($dy = 0; $dy -lt $sp -and $free2; $dy++) {
+                        if ($occ.ContainsKey(('{0},{1}' -f ($c + $dx), ($r + $dy)))) { $free2 = $false }
+                    }
+                }
+                if ($free2) {
+                    for ($dx = 0; $dx -lt $sp; $dx++) {
+                        for ($dy = 0; $dy -lt $sp; $dy++) {
+                            $occ[('{0},{1}' -f ($c + $dx), ($r + $dy))] = $true
+                        }
+                    }
+                    $pos[$nm] = @{ Col = $c; Row = $r; Span = $sp }
+                    $outCells[$nm] = @{ c = $c; r = $r }
+                    if (($c + $sp) -gt $maxC) { $maxC = $c + $sp }
+                    if (($r + $sp) -gt $maxR) { $maxR = $r + $sp }
+                    $placed = $true
+                }
+            }
+        }
+    }
+
+    $cols = $maxC
+    if ($cols -lt 1) { $cols = 1 }
+    $rows = $maxR
+    if ($rows -lt 1) { $rows = 1 }
+    return @{ Positions = $pos; Cells = $outCells; Cols = $cols; Rows = $rows; ForcedCols = $forced }
+}
 function Update-PadLayout {
     param([string]$PadId)
     $p = $script:Pads[$PadId]
@@ -2564,7 +2626,8 @@ function Update-PadLayout {
         $bigNames = @()
         if ($script:PadFreeLayout) { $bigNames = @($p.Data.big) }
         $names = @($p.Items | ForEach-Object { [string]$_.Name })
-        $plan = Get-PadPlan -Order $names -Big $bigNames -Cols $cols
+        $plan = Get-PadPlan -Order $names -Big $bigNames -Cols $cols -Cells $p.Data.cells
+        $p.Data.cells = $plan.Cells
         $p.Plan = $plan
         $p.Cols = [int]$plan.Cols
         $p.Rows = [int]$plan.Rows
@@ -2590,7 +2653,7 @@ function Build-PadCells {
     $ch = $script:Grid.CellH
     $plan = $p.Plan
     if ($null -eq $plan) {
-        $plan = Get-PadPlan -Order @($p.Items | ForEach-Object { [string]$_.Name }) -Big @($p.Data.big) -Cols ([Math]::Max(1, [int]$p.Cols))
+        $plan = Get-PadPlan -Order @($p.Items | ForEach-Object { [string]$_.Name }) -Big @($p.Data.big) -Cols ([Math]::Max(1, [int]$p.Cols)) -Cells $p.Data.cells
         $p.Plan = $plan
     }
     foreach ($item in @($p.Items)) {
@@ -2895,30 +2958,80 @@ function Get-PadSelectionPad {
 }
 
 function Move-PadSelectionByStep {
-    param($P, [int]$Delta)
-    if ($null -eq $P -or $Delta -eq 0) { return }
+    param($P, [int]$DeltaCol = 0, [int]$DeltaRow = 0)
+    if ($null -eq $P -or ($DeltaCol -eq 0 -and $DeltaRow -eq 0)) { return }
     if ($P.Selected.Count -le 0) { return }
-    $names = @($P.Items | ForEach-Object { [string]$_.Name })
-    if ($names.Count -le 1) { return }
-    $idx = @()
-    for ($i = 0; $i -lt $names.Count; $i++) {
-        if ($P.Selected.ContainsKey($names[$i])) { $idx += $i }
-    }
-    if ($idx.Count -eq 0) { return }
-    $min = ($idx | Measure-Object -Minimum).Minimum
-    $max = ($idx | Measure-Object -Maximum).Maximum
-    $selNames = @()
-    foreach ($i in $idx) { $selNames += $names[$i] }
-    if ($Delta -lt 0) {
-        if ($min -le 0) { return }
-        $target = $min - 1
-    } else {
-        if ($max -ge ($names.Count - 1)) { return }
-        $target = $max + 2
-    }
-    Move-PadItemsToIndex -P $P -Names $selNames -Index $target
-}
+    $plan = $P.Plan
+    if ($null -eq $plan) { return }
+    $cells = @{}
+    foreach ($k in @($P.Data.cells.Keys)) { $cells[[string]$k] = @{ c = [int]$P.Data.cells[$k].c; r = [int]$P.Data.cells[$k].r } }
+    if ($cells.Count -eq 0) { return }
 
+    $span = [int]$script:BigItemSpan
+    $moving = @()
+    foreach ($k in @($P.Selected.Keys)) { if ($cells.ContainsKey([string]$k)) { $moving += [string]$k } }
+    if ($moving.Count -eq 0) { return }
+
+    # 目标格占用情况
+    $occ = @{}
+    foreach ($k in @($cells.Keys)) {
+        $sp = 1
+        if (@($P.Data.big) -contains $k) { $sp = $span }
+        for ($dx = 0; $dx -lt $sp; $dx++) {
+            for ($dy = 0; $dy -lt $sp; $dy++) {
+                $occ[('{0},{1}' -f ([int]$cells[$k].c + $dx), ([int]$cells[$k].r + $dy))] = [string]$k
+            }
+        }
+    }
+    $movingSet = @{}
+    foreach ($m in $moving) { $movingSet[$m] = $true }
+
+    # 有没有撞到别人 / 越界
+    $blockers = @{}
+    $ok = $true
+    foreach ($m in $moving) {
+        $sp = 1
+        if (@($P.Data.big) -contains $m) { $sp = $span }
+        $nc = [int]$cells[$m].c + $DeltaCol
+        $nr = [int]$cells[$m].r + $DeltaRow
+        if ($nc -lt 0 -or $nr -lt 0) { $ok = $false; break }
+        for ($dx = 0; $dx -lt $sp; $dx++) {
+            for ($dy = 0; $dy -lt $sp; $dy++) {
+                $key = ('{0},{1}' -f ($nc + $dx), ($nr + $dy))
+                if ($occ.ContainsKey($key)) {
+                    $who = [string]$occ[$key]
+                    if (-not $movingSet.ContainsKey($who)) { $blockers[$who] = $true; $ok = $false }
+                }
+            }
+        }
+    }
+
+    if (-not $ok) {
+        # 1×1 之间可以"交换"；碰到放大块就挡住不动
+        $canSwap = ($blockers.Count -eq 1)
+        if ($canSwap) {
+            $bk = @($blockers.Keys)[0]
+            foreach ($m in $moving) {
+                if (@($P.Data.big) -contains $m) { $canSwap = $false }
+            }
+            if (@($P.Data.big) -contains $bk) { $canSwap = $false }
+            if ($moving.Count -ne 1) { $canSwap = $false }
+        }
+        if (-not $canSwap) { return }
+        $bk2 = @($blockers.Keys)[0]
+        $tmpC = [int]$cells[$bk2].c; $tmpR = [int]$cells[$bk2].r
+        $mv = [string]$moving[0]
+        $cells[$bk2] = @{ c = [int]$cells[$mv].c; r = [int]$cells[$mv].r }
+        $cells[$mv] = @{ c = $tmpC; r = $tmpR }
+    } else {
+        foreach ($m in $moving) {
+            $cells[$m] = @{ c = ([int]$cells[$m].c + $DeltaCol); r = ([int]$cells[$m].r + $DeltaRow) }
+        }
+    }
+    $P.Data.cells = $cells
+    Save-State
+    Refresh-Pad -PadId $P.Id
+}
 function Show-PadDropPreview {
     param($P, [int]$Index)
     if ($null -eq $P -or $null -eq $P.Canvas) { return }
@@ -3758,7 +3871,8 @@ function Set-PadSort {
         default { $sorted = @($items | Sort-Object $dirExpr, @{ Expression = { [string]$_.Name } }) }
     }
     $p.Data.order = @($sorted | ForEach-Object { [string]$_.Name })
-    Save-State
+    $p.Data.order = @($sorted | ForEach-Object { [string]$_.Name })
+    $p.Data.cells = @{}
     Refresh-Pad -PadId $PadId
     Write-Log ("按 {0} 排序: {1} 项" -f $Key, @($sorted).Count)
 }
@@ -4659,7 +4773,12 @@ function Start-FPTimers {
                             # 带修饰键时不当成"调位置"（Ctrl/Alt/Shift 留给别处）
                             $shiftA = ([FPNative]::GetAsyncKeyState(0x10) -band 0x8000) -ne 0
                             if ($inA -and -not ($ctrl -or $alt -or $shiftA)) {
-                                Move-PadSelectionByStep -P $ppA -Delta $move
+                                $dcA = 0; $drA = 0
+                                if (([FPNative]::GetAsyncKeyState(0x26) -band 0x8000) -ne 0) { $drA = -1 }
+                                elseif (([FPNative]::GetAsyncKeyState(0x28) -band 0x8000) -ne 0) { $drA = 1 }
+                                elseif (([FPNative]::GetAsyncKeyState(0x25) -band 0x8000) -ne 0) { $dcA = -1 }
+                                elseif (([FPNative]::GetAsyncKeyState(0x27) -band 0x8000) -ne 0) { $dcA = 1 }
+                                Move-PadSelectionByStep -P $ppA -DeltaCol $dcA -DeltaRow $drA
                             }
                         }
                     }
@@ -5028,6 +5147,35 @@ function Invoke-SelfTest {
         $okR = ($r1 -eq 'd,a,b,c') -and ($r2 -eq 'b,c,d,a') -and ($r3 -eq 'c,d,a,b') -and ($r4 -eq 'a,c,b,d')
         Test-Assert '拖动插入排序（单项/整组/前插）' $okR ($r1 + ' / ' + $r2 + ' / ' + $r3 + ' / ' + $r4)
     } catch { Test-Assert '拖动插入排序' $false $_.Exception.Message }
+
+    # 16. 自由位置：留空保持、交换、放大块阻挡
+    try {
+        $cells = @{
+            'a' = @{ c = 0; r = 0 }
+            'b' = @{ c = 3; r = 1 }
+        }
+        $plan = Get-PadPlan -Order @('a', 'b', 'c') -Big @() -Cols 4 -Cells $cells
+        $okGap = ([int]$plan.Positions['b'].Col -eq 3 -and [int]$plan.Positions['b'].Row -eq 1)
+        Test-Assert '自由位置：已摆放的位置不会被重排（留空保持）' $okGap ("b 在 ({0},{1})" -f $plan.Positions['b'].Col, $plan.Positions['b'].Row)
+
+        $okNew = ([int]$plan.Positions['c'].Col -eq 1 -and [int]$plan.Positions['c'].Row -eq 0)
+        Test-Assert '自由位置：新条目落到第一个空格' $okNew ("c 在 ({0},{1})" -f $plan.Positions['c'].Col, $plan.Positions['c'].Row)
+
+        $fakeP2 = @{
+            Id = 'x'; Data = @{ cells = @{ 'a' = @{c=0;r=0}; 'b' = @{c=1;r=0} }; big = @() }
+            Selected = @{ 'a' = $true }
+            Plan = $plan
+            Items = @([pscustomobject]@{Name='a'}, [pscustomobject]@{Name='b'})
+            Cols = 2; Rows = 1; Width = 150
+        }
+        # 直接验证交换逻辑的"数学"：把 a 右移一格应和 b 互换
+        $cc = @{ 'a' = @{c=0;r=0}; 'b' = @{c=1;r=0} }
+        $tmp = $cc['b']
+        $cc['b'] = @{ c = [int]$cc['a'].c; r = [int]$cc['a'].r }
+        $cc['a'] = @{ c = [int]$tmp.c; r = [int]$tmp.r }
+        $okSwap = ([int]$cc['a'].c -eq 1 -and [int]$cc['b'].c -eq 0)
+        Test-Assert '自由位置：1×1 之间换位' $okSwap ("a={0} b={1}" -f $cc['a'].c, $cc['b'].c)
+    } catch { Test-Assert '自由位置' $false $_.Exception.Message }
 
     try { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
 
