@@ -16,7 +16,7 @@
 
 | 方式 | 链接 | 说明 |
 | --- | --- | --- |
-| **推荐：整包下载** | **[⬇ 下载 FolderPad.zip](https://github.com/Teriririr/FolderPad/releases/latest)** | 进 Releases 页面点 `FolderPad-v1.0.0.zip`，解压即用 |
+| **推荐：整包下载** | **[⬇ 下载 FolderPad.zip](https://github.com/Teriririr/FolderPad/releases/latest)** | 进 Releases 页面点 `FolderPad.zip`，解压即用 |
 | 源码 zip | [main.zip](https://github.com/Teriririr/FolderPad/archive/refs/heads/main.zip) | GitHub 自动打包 |
 | 克隆 | `git clone https://github.com/Teriririr/FolderPad.git` | 想改代码用这个 |
 
@@ -25,7 +25,7 @@
 懒得点？在 PowerShell 里粘这一行，直接把最新版拉到桌面：
 
 ```powershell
-$z="$env:TEMP\FolderPad.zip"; Invoke-WebRequest 'https://github.com/Teriririr/FolderPad/releases/latest/download/FolderPad-v1.0.0.zip' -OutFile $z; Expand-Archive $z "$env:USERPROFILE\Desktop\FolderPad" -Force; Start-Process "$env:USERPROFILE\Desktop\FolderPad"
+$z="$env:TEMP\FolderPad.zip"; Invoke-WebRequest 'https://github.com/Teriririr/FolderPad/releases/latest/download/FolderPad.zip' -OutFile $z; Expand-Archive $z "$env:USERPROFILE\Desktop\FolderPad" -Force; Start-Process "$env:USERPROFILE\Desktop\FolderPad"
 ```
 
 ---
