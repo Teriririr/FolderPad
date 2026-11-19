@@ -85,6 +85,7 @@ $script:FontFamily         = 'Microsoft YaHei UI'
 $script:PadFreeLayout      = $true   # false = 退回纯网格（忽略 big / rows），出问题时的兜底开关
 $script:BigItemSpan        = 2       # 放大突出的大格占几格（固定 2×2）
 $script:BigIconScale       = 2       # 大格图标 = 普通图标 × 这个倍数
+$script:ReorderByDrag      = $false  # 框内拖动排序（默认关：改用手感更好的方向键）
 
 $script:State      = $null
 $script:Pads       = @{}      # id -> 运行时对象（窗口、控件、条目）
@@ -103,6 +104,7 @@ $script:LastDate   = (Get-Date).Date
 $script:LastRefresh = Get-Date
 $script:SelfTestResult = @()
 $script:HookedHwnds = @{}
+$script:ArrowLatch = $false
 
 # =====================================================================
 # 原生互操作
@@ -169,6 +171,8 @@ public static class FPNative
     public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
     [DllImport("user32.dll", SetLastError = true)]
@@ -2719,10 +2723,12 @@ function New-PadCell {
             if ([Math]::Abs($cur.x - $pp.DragPoint.x) -lt 6 -and [Math]::Abs($cur.y - $pp.DragPoint.y) -lt 6) { return }
             $local = Get-PadLocalPoint -P $pp -Point $cur
             $inside = Test-PadContentPoint -P $pp -Local $local
-            if ($inside) {
+            if ($inside -and $script:ReorderByDrag) {
                 $pp.DragOrderMode = $true
                 $idx = Find-PadInsertIndex -P $pp -LocalX $local.x -LocalY $local.y
                 Show-PadDropPreview -P $pp -Index $idx
+            } elseif ($inside) {
+                # 拖动排序已关闭：框内拖动什么都不做（用方向键调位置）
             } else {
                 Hide-PadDropPreview -P $pp
                 $names = @($pp.DragNames)
@@ -2861,6 +2867,56 @@ function Move-PadItemsToIndex {
     Save-State
     Refresh-Pad -PadId $P.Id
     Write-Log ("顺序调整: " + ($newOrder -join ' > '))
+}
+
+function Get-ForegroundIsDesktop {
+    # 判断前台窗口是不是"桌面"（Progman / WorkerW 或 SHELLDLL_DefView）
+    try {
+        $fg = [FPNative]::GetForegroundWindow()
+        if ($fg -eq [IntPtr]::Zero) { return $false }
+        $sb = New-Object System.Text.StringBuilder 256
+        [void][FPNative]::GetClassName($fg, $sb, 256)
+        $cls = $sb.ToString()
+        if ($cls -eq 'Progman' -or $cls -eq 'WorkerW' -or $cls -eq 'SHELLDLL_DefView') { return $true }
+        return $false
+    } catch { return $false }
+}
+
+function Get-PadSelectionPad {
+    # 找到"当前有选中项"的框（多框时以最后操作的那个为准）
+    $cand = $null
+    foreach ($k in @($script:Pads.Keys)) {
+        $pp = $script:Pads[$k]
+        if ($null -eq $pp -or $null -eq $pp.Selected) { continue }
+        if ($pp.Selected.Count -le 0) { continue }
+        $cand = $pp
+    }
+    return $cand
+}
+
+function Move-PadSelectionByStep {
+    param($P, [int]$Delta)
+    if ($null -eq $P -or $Delta -eq 0) { return }
+    if ($P.Selected.Count -le 0) { return }
+    $names = @($P.Items | ForEach-Object { [string]$_.Name })
+    if ($names.Count -le 1) { return }
+    $idx = @()
+    for ($i = 0; $i -lt $names.Count; $i++) {
+        if ($P.Selected.ContainsKey($names[$i])) { $idx += $i }
+    }
+    if ($idx.Count -eq 0) { return }
+    $min = ($idx | Measure-Object -Minimum).Minimum
+    $max = ($idx | Measure-Object -Maximum).Maximum
+    $selNames = @()
+    foreach ($i in $idx) { $selNames += $names[$i] }
+    if ($Delta -lt 0) {
+        if ($min -le 0) { return }
+        $target = $min - 1
+    } else {
+        if ($max -ge ($names.Count - 1)) { return }
+        $target = $max + 2
+    }
+    Move-PadItemsToIndex -P $P -Names $selNames -Index $target
 }
 
 function Show-PadDropPreview {
@@ -4583,6 +4639,31 @@ function Start-FPTimers {
                         Toggle-AllPads
                     }
                 } else { $script:HotLatch = $false }
+
+                # 方向键调整顺序：↑/← 前移一位，↓/→ 后移一位
+                # 触发条件：有选中项 + 鼠标停在该框上 + 前台是桌面（避免打字时误伤）
+                $move = 0
+                if (([FPNative]::GetAsyncKeyState(0x26) -band 0x8000) -ne 0) { $move = -1 }
+                elseif (([FPNative]::GetAsyncKeyState(0x28) -band 0x8000) -ne 0) { $move = 1 }
+                elseif (([FPNative]::GetAsyncKeyState(0x25) -band 0x8000) -ne 0) { $move = -1 }
+                elseif (([FPNative]::GetAsyncKeyState(0x27) -band 0x8000) -ne 0) { $move = 1 }
+                if ($move -ne 0) {
+                    if (-not $script:ArrowLatch) {
+                        $script:ArrowLatch = $true
+                        $ppA = Get-PadSelectionPad
+                        if ($ppA) {
+                            $curA = Get-CursorDip
+                            $lx = $curA.x - [double]$ppA.Data.pos.x
+                            $ly = $curA.y - [double]$ppA.Data.pos.y
+                            $inA = ($lx -ge 0 -and $lx -le [double]$ppA.Width -and $ly -ge 0 -and $ly -le ([double]$script:TitleHeight + [double]$ppA.Rows * [double]$script:Grid.CellH))
+                            # 带修饰键时不当成"调位置"（Ctrl/Alt/Shift 留给别处）
+                            $shiftA = ([FPNative]::GetAsyncKeyState(0x10) -band 0x8000) -ne 0
+                            if ($inA -and -not ($ctrl -or $alt -or $shiftA)) {
+                                Move-PadSelectionByStep -P $ppA -Delta $move
+                            }
+                        }
+                    }
+                } else { $script:ArrowLatch = $false }
 
                 # 左键刚按下：落点不在任何框里 → 取消所有选中（桌面习惯）
                 $lmb = ([FPNative]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0
