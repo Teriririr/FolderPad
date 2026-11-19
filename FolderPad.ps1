@@ -105,6 +105,7 @@ $script:LastRefresh = Get-Date
 $script:SelfTestResult = @()
 $script:HookedHwnds = @{}
 $script:ArrowLatch = $false
+$script:TickErrLast = ''
 
 # =====================================================================
 # 原生互操作
@@ -4935,7 +4936,7 @@ function Start-FPTimers {
                         }
                     }
                 } else { $script:ArrowLatch = $false
-                } else { $script:ArrowLatch = $false }
+$script:TickErrLast = '' }
 
                 # 左键刚按下：落点不在任何框里 → 取消所有选中（桌面习惯）
                 $lmb = ([FPNative]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0
@@ -4963,7 +4964,13 @@ function Start-FPTimers {
                     }
                 }
                 if (-not $lmb) { $script:LmbLatch = $false }
-            } catch { }
+            } catch {
+                # 定时器里出错不要静默：同一条错只记一次，方便排查（以前这里空 catch，出问题完全没声音）
+                try {
+                    $msg = $_.Exception.Message
+                    if ($msg -ne $script:TickErrLast) { $script:TickErrLast = $msg; Write-Log ("定时器异常: " + $msg) 'WARN' }
+                } catch { }
+            }
         })
     $hot.Start()
     $script:TimerHot = $hot
