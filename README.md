@@ -7,6 +7,7 @@
 [![WPF](https://img.shields.io/badge/UI-WPF-512BD4)](#)
 [![License](https://img.shields.io/badge/License-Non--Commercial-red)](LICENSE)
 [![Size](https://img.shields.io/badge/install-%E5%85%8D%E5%AE%89%E8%A3%85-brightgreen)](#)
+[![Version](https://img.shields.io/badge/version-1.2.3-blue)](#)
 
 **🇨🇳 中文** | [English summary](#english-summary)
 
@@ -77,11 +78,13 @@ FolderPad 把这些文件夹**变成桌面上的一块围栏**：图标直接铺
 
 ### 桌面围栏
 - 图标按**真实桌面网格**对齐（读取系统图标尺寸与间距，DPI 感知），视觉上跟桌面融为一体
-- 框的宽高 = 列数 × 格宽 / 行数 × 格高，**自动跟着文件数长大**，也能强制 1 / 2 列
+- **图标永远对齐**：名字一行还是两行，图标都在同一条水平线上（标签固定占两行高度，整块内容仍居中）
+- 框的宽高 = 列数 × 格宽 / 行数 × 格高，**跟着内容长大**；列数/行数可锁 1–8
 - **点击穿透**：框内空白处点击会落到桌面（能直接选桌面图标），只有图标格、标题条才接住鼠标
 - 拖拽**进出**都支持：从框里往桌面/资源管理器拖 = 移出；从桌面/资源管理器拖进框 = 移入
 - 拖动标题条移动整个框，位置立即落盘
-- 选中遵循桌面习惯：全局单选，点空白 / 点桌面 / 点别的窗口立刻取消
+- 选中遵循桌面习惯：点空白 / 点桌面 / 点别的窗口立刻取消
+- 框里**不显示** Office 临时锁文件（`~$xxx.docx`）、`Thumbs.db`、`desktop.ini`（跟资源管理器默认一致）
 
 ### 倒计时
 - 右键 →「设置截止日期…」，有 今天 / 明天 / 三天后 / 一周后 / 两周后 / 自定义
@@ -100,10 +103,17 @@ FolderPad 把这些文件夹**变成桌面上的一块围栏**：图标直接铺
 | 过期 | 剩余 < 0 | `#9A9A9A` 灰（标题条去饱和） | 已结束 |
 
 ### 排列自由
-- **自由摆放**：选中后 `↑` `↓` `←` `→` 一格一格挪（**不会同时动到桌面的选中**——用低层键盘钩子只在"框有选中 + 鼠标在框上 + 焦点是桌面"时吞键），**允许留空**（想挪到下面一行就挪，上面空着不补位）；撞到普通图标会交换，撞到放大块则挪不动；多选整组挪
+- **自由摆放，允许留空**：每个图标有自己的格子坐标，想挪到下面一行就挪，上面空着不补位
+- **方向键 = 先挪，挪不动就换选中**：
+  - 目标格空着 → 移动一格
+  - 目标格被占 / 到边界 → **选中框跳到那个方向的邻居**，所以可以一路按方向键"走"过去挑图标
+  - `Alt` + 方向键 → 和邻居**交换**位置（双方都是普通图标才换，放大块不参与）
+  - 多选时整组一起挪
+- **不会连带选中桌面图标**：框不抢键盘焦点，所以程序装了低层键盘钩子——只在「框里有选中项 + 鼠标停在框上 + 当前焦点是桌面」时吞掉方向键；切到浏览器后方向键照常归浏览器
 - **多选**：`Ctrl` + 单击加选/减选，`Shift` + 单击按顺序连选（沿用系统习惯）
-- **行列可控**：右键 →「布局与排序…」，列数/行数各支持 1–8（0 = 自动）；四种自动排序（名称/修改时间/大小/类型）会重排一次位置，想保留手动摆放就选「保持手动」
-- **放大突出**：右键单个图标 →「放大突出（占 2×2）」，它占四格、图标翻倍（96px 高分图标），其余图标自动往里挤
+- **整理（挤掉空格）**：自由摆放会留空洞，右键 →「整理（挤掉空格）」一键把图标按顺序挤紧，框也缩到最小；菜单右侧会提示当前空了几格
+- **行列与排序**：右键 →「布局与排序…」，列数/行数各 1–8（0 = 自动）；四种自动排序（名称/修改时间/大小/类型）会重排一次位置，想保留手动摆放就选「保持手动」
+- **放大突出**：右键单个图标 →「放大突出（占 2×2）」，它占四格、图标翻倍（96px 高分图标），其余图标自动补位
 
 ### 其它
 - **类别色**：标题条可以单独上色（12 色可选），跟紧急度互不干扰
@@ -125,7 +135,7 @@ FolderPad 把这些文件夹**变成桌面上的一块围栏**：图标直接铺
 ```
 1  安装（桌面快捷方式 + 发送到入口 + 可选开机自启）
 2  卸载快捷方式（不动数据、不动你的文件）
-3  自检（14 项，检查数据、档位、属性还原、压缩）
+3  自检（29 项，检查数据、占位打包、方向键导航、属性还原、压缩）
 4  调试启动（保留控制台，看报错）
 5  恢复隐藏文件夹（万一文件夹"不见了"用这个）
 ```
@@ -146,7 +156,9 @@ FolderPad 把这些文件夹**变成桌面上的一块围栏**：图标直接铺
 | --- | --- |
 | 单击图标 | 选中（蓝框） |
 | `Ctrl` + 单击 / `Shift` + 单击 | 加选减选 / 连选一段 |
-| 选中后按 `↑` `↓` `←` `→` | 往该方向移动一格（可留空；多选整组挪） |
+| 选中后按 `↑` `↓` `←` `→` | 往该方向移动一格；挪不动时选中跳到该方向邻居 |
+| `Alt` + 方向键 | 和该方向的邻居交换位置 |
+| 右键 → 整理（挤掉空格） | 把所有图标挤到最紧凑，去掉空洞 |
 | 双击图标 | 打开文件 / 进入文件夹 |
 | 拖图标出去 | 移动到桌面或资源管理器 |
 | 拖文件进来 | 移入这个文件夹 |
@@ -171,8 +183,8 @@ FolderPad 把这些文件夹**变成桌面上的一块围栏**：图标直接铺
 | 基本 | 打开文件夹、刷新 |
 | 时间 | 设置截止日期…、重命名…（同时改文件夹名） |
 | 配色 | 底色随剩余天数自动变色、紧急度档位配色…、类别色…（标题条） |
-| 大小 | 自动 / 强制 1 列 / 强制 2 列 |
-| 窗口 | 置顶 |
+| 布局 | 布局与排序…（列数/行数/四种自动排序）、整理（挤掉空格，有空洞时才出现） |
+| 窗口 | 置顶（开启后框永远压在其他窗口上方；关闭时待在桌面层，会被浏览器等窗口盖住。注意：开着置顶时全屏视频/游戏会被它压住） |
 | 归档 | 归档为压缩包（.zip）、归档为文件夹（原地加日期前缀）、归档为文件夹（移到归档目录） |
 | 危险 | 转为普通文件夹、隐藏这个框、移除记录（不删文件） |
 | 程序 | FolderPad 设置…、退出 |
@@ -251,12 +263,29 @@ $script:SeamLo        = 0.38  # 下沿压暗
 ## 已知限制
 
 1. **只支持 Windows 10 / 11**，依赖 WPF 与 Shell API；不支持 macOS / Linux。
-2. **图标是系统 32px 图标**，桌面图标放大到 48px 时框内会略软（受 Shell 图标列表尺寸限制）。
+2. **普通图标是系统 32px 图标**（放大突出用 96px JUMBO）；桌面图标设成更大尺寸时，普通格会略软。
 3. **混合 DPI 多显示器**下，副屏可能有一两个像素的偏移。
-4. **按 `Win+D`（显示桌面）时框会被一起收起**——它在 z 序底部，不是真正的桌面壁纸层窗口；再按一次 `Win+D` 就回来。要挂到 `WorkerW` 才能彻底解决，暂未实现。
+4. **按 `Win+D`（显示桌面）时框会被一起收起**——它在 z 序底部，不是真正的桌面壁纸层窗口；再按一次 `Win+D` 就回来。
 5. **外部重命名/移动文件夹**后，框会显示「路径失效」，需要右键「重新定位…」。
 6. **归档保留源文件夹**（只增不删），需要手动清理。
-7. **不做框选**（空白处拖矩形多选）：会和"空白处点击穿透"冲突，多选改用 `Ctrl` / `Shift` 点选；图标放大只支持 2×2 一档。
+7. **不做框选**（空白处拖矩形多选）：会和"空白处点击穿透"冲突，多选改用 `Ctrl` / `Shift` 点选。
+8. **图标放大只支持 2×2** 一档（不做 3×3 或任意尺寸）。
+9. **方向键需要鼠标停在框上**才生效（避免你在别处打字时误伤图标）；框永远不抢键盘焦点。
+10. **自动排序会覆盖手动摆放**（想保留手动位置就选「保持手动」）。
+
+---
+
+## 更新日志
+
+| 版本 | 内容 |
+| --- | --- |
+| **1.2.3** | 右键「整理（挤掉空格）」；方向键改为"挪不动就换选中"；`Alt`+方向键 交换 |
+| 1.2.2 | 图标上下对齐（标签固定两行高度）；不显示 Office 临时锁文件与系统垃圾文件 |
+| 1.2.1 | 方向键不再连带选中桌面图标（低层键盘钩子）；修复"点框外取消选中"失效；定时器异常写日志 |
+| 1.2.0 | **自由摆放**：位置由 `pad.cells` 决定，允许留空；方向键四向移动 |
+| 1.1.1 | 顺序调整改用方向键；弃用拖动排序 |
+| 1.1.0 | 多选（Ctrl/Shift）、2×2 放大突出、列数/行数/自动排序 |
+| 1.0.0 | 首个公开版本：围栏框、倒计时、紧急度配色、崩溃安全隐藏、托盘常驻 |
 
 ---
 
@@ -276,12 +305,12 @@ $script:SeamLo        = 0.38  # 下沿压暗
 
 ```
 FolderPad/
-├─ FolderPad.ps1        # 全部逻辑（约 4300 行，122 个函数）
+├─ FolderPad.ps1        # 全部逻辑（约 5600 行，146 个函数）
 ├─ FolderPad.vbs        # 启动器（隐藏控制台）
 ├─ 安装与自检.cmd        # 安装 / 卸载 / 自检 / 恢复 菜单
 ├─ 使用说明.md           # 完整说明书
 ├─ 需求说明.md/.docx     # 最初的需求文档
-├─ 截图/                 # 文档里的配图
+├─ 截图/                 # 13 张演示数据配图（不含任何真实路径）
 └─ LICENSE
 ```
 
@@ -311,12 +340,13 @@ A：单文件、可读、可改、不需要编译环境。你要调外观直接�
 **FolderPad** turns a desktop folder into a "fence" — a translucent rounded panel that shows the folder's icons in place, with a countdown in the title bar and a background color that turns urgent as the deadline approaches.
 
 - One folder = one path, two presentations. Converting never copies, moves or encrypts files; the folder is just marked hidden while the frame is shown.
-- Windows PowerShell 5.1 + WPF, single script, no installer, no admin rights, no network.
-- Click-through blank areas, drag files in and out, DPI-aware desktop grid alignment, crash-safe hidden-attribute bookkeeping.
+- **Free icon layout**: every icon keeps its own grid cell, holes allowed. Arrow keys move the selected icon one cell; when it can't move, the selection hops to the neighbour in that direction (so you can walk the grid with the keyboard). `Alt`+arrow swaps two icons. Right-click → **Tidy** packs everything tight.
+- Per-icon **2×2 zoom** (96 px shell icon), multi-select with `Ctrl`/`Shift`, column/row lock 1–8, four auto-sort modes.
+- Icons stay on one baseline whether the label wraps to one or two lines; Office lock files (`~$*.docx`), `Thumbs.db` and `desktop.ini` are hidden.
+- Windows PowerShell 5.1 + WPF, single script, no installer, no admin rights, no network. Click-through blank areas, drag files in and out, DPI-aware desktop grid, crash-safe hidden-attribute bookkeeping.
 - License: **non-commercial** (see [LICENSE](LICENSE)). Commercial use requires permission.
 
 ---
-
 ## 许可 · License
 
 本项目**公开但不允许商用**，详见 [LICENSE](LICENSE)：
