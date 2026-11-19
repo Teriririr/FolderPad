@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:AppName    = 'FolderPad'
-$script:AppVersion = '1.2.1'
+$script:AppVersion = '1.2.2'
 $script:AppDir     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:DataDir           = Join-Path $env:APPDATA 'FolderPad'
@@ -2852,10 +2852,15 @@ function New-PadCell {
     $tb.Foreground = New-FPBrush '#FFFFFF' 0.96
     $tb.TextAlignment = 'Center'
     $tb.TextWrapping = 'Wrap'
-    $tb.MaxHeight = 31
-    if ($isBig) { $tb.MaxHeight = 34 }
-    $tb.Margin = '0,4,0,0'
+    # 标签固定占两行高度（不管实际一行还是两行）：
+    # 于是每格"图标 + 标签"总高一致 → 图标整排对齐，整块仍然垂直居中
     $tb.LineHeight = 14.5
+    $labelH = 29
+    if ($isBig) { $labelH = 31 }
+    $tb.Height = $labelH
+    $tb.MaxHeight = $labelH
+    $tb.VerticalAlignment = 'Top'
+    $tb.Margin = '0,4,0,0'
     $sh = New-Object System.Windows.Media.Effects.DropShadowEffect
     $sh.BlurRadius = 4
     $sh.ShadowDepth = 0
