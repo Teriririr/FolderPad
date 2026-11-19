@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:AppName    = 'FolderPad'
-$script:AppVersion = '1.1.1'
+$script:AppVersion = '1.2.0'
 $script:AppDir     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:DataDir           = Join-Path $env:APPDATA 'FolderPad'
