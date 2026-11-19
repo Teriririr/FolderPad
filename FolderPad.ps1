@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:AppName    = 'FolderPad'
-$script:AppVersion = '1.2.2'
+$script:AppVersion = '1.2.3'
 $script:AppDir     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:DataDir           = Join-Path $env:APPDATA 'FolderPad'
@@ -3100,21 +3100,19 @@ function Get-PadSelectionPad {
 }
 
 function Move-PadSelectionByStep {
-    param($P, [int]$DeltaCol = 0, [int]$DeltaRow = 0)
-    if ($null -eq $P -or ($DeltaCol -eq 0 -and $DeltaRow -eq 0)) { return }
-    if ($P.Selected.Count -le 0) { return }
-    $plan = $P.Plan
-    if ($null -eq $plan) { return }
+    param($P, [int]$DeltaCol = 0, [int]$DeltaRow = 0, [switch]$Swap)
+    # 返回 $true = 挪成功了；$false = 挪不动（被挡/越界），调用方可以改为"换选中"
+    if ($null -eq $P -or ($DeltaCol -eq 0 -and $DeltaRow -eq 0)) { return $false }
+    if ($P.Selected.Count -le 0) { return $false }
     $cells = @{}
     foreach ($k in @($P.Data.cells.Keys)) { $cells[[string]$k] = @{ c = [int]$P.Data.cells[$k].c; r = [int]$P.Data.cells[$k].r } }
-    if ($cells.Count -eq 0) { return }
+    if ($cells.Count -eq 0) { return $false }
 
     $span = [int]$script:BigItemSpan
     $moving = @()
     foreach ($k in @($P.Selected.Keys)) { if ($cells.ContainsKey([string]$k)) { $moving += [string]$k } }
-    if ($moving.Count -eq 0) { return }
+    if ($moving.Count -eq 0) { return $false }
 
-    # 目标格占用情况
     $occ = @{}
     foreach ($k in @($cells.Keys)) {
         $sp = 1
@@ -3128,7 +3126,6 @@ function Move-PadSelectionByStep {
     $movingSet = @{}
     foreach ($m in $moving) { $movingSet[$m] = $true }
 
-    # 有没有撞到别人 / 越界
     $blockers = @{}
     $ok = $true
     foreach ($m in $moving) {
@@ -3148,31 +3145,67 @@ function Move-PadSelectionByStep {
         }
     }
 
-    if (-not $ok) {
-        # 1×1 之间可以"交换"；碰到放大块就挡住不动
-        $canSwap = ($blockers.Count -eq 1)
-        if ($canSwap) {
-            $bk = @($blockers.Keys)[0]
-            foreach ($m in $moving) {
-                if (@($P.Data.big) -contains $m) { $canSwap = $false }
-            }
-            if (@($P.Data.big) -contains $bk) { $canSwap = $false }
-            if ($moving.Count -ne 1) { $canSwap = $false }
-        }
-        if (-not $canSwap) { return }
-        $bk2 = @($blockers.Keys)[0]
-        $tmpC = [int]$cells[$bk2].c; $tmpR = [int]$cells[$bk2].r
-        $mv = [string]$moving[0]
-        $cells[$bk2] = @{ c = [int]$cells[$mv].c; r = [int]$cells[$mv].r }
-        $cells[$mv] = @{ c = $tmpC; r = $tmpR }
-    } else {
+    if ($ok) {
         foreach ($m in $moving) {
             $cells[$m] = @{ c = ([int]$cells[$m].c + $DeltaCol); r = ([int]$cells[$m].r + $DeltaRow) }
         }
+        $P.Data.cells = $cells
+        Save-State
+        Refresh-Pad -PadId $P.Id
+        return $true
     }
+
+    # 被挡住：只有显式要求交换（Alt+方向键）且双方都是 1×1 时才换
+    if (-not $Swap) { return $false }
+    if ($blockers.Count -ne 1 -or $moving.Count -ne 1) { return $false }
+    $bk = @($blockers.Keys)[0]
+    $mv = [string]$moving[0]
+    if ((@($P.Data.big) -contains $mv) -or (@($P.Data.big) -contains $bk)) { return $false }
+    $tmpC = [int]$cells[$bk].c; $tmpR = [int]$cells[$bk].r
+    $cells[$bk] = @{ c = [int]$cells[$mv].c; r = [int]$cells[$mv].r }
+    $cells[$mv] = @{ c = $tmpC; r = $tmpR }
     $P.Data.cells = $cells
     Save-State
     Refresh-Pad -PadId $P.Id
+    return $true
+}
+
+function Select-PadNeighbor {
+    param($P, [int]$DeltaCol = 0, [int]$DeltaRow = 0)
+    # 把"选中"挪到该方向的邻居上（挪不动的时候用），返回 $true 表示找到了
+    if ($null -eq $P -or $P.Selected.Count -ne 1) { return $false }
+    $cur = [string](@($P.Selected.Keys)[0])
+    $plan = $P.Plan
+    if ($null -eq $plan -or -not $plan.Positions.ContainsKey($cur)) { return $false }
+    $me = $plan.Positions[$cur]
+    $cx = [double]$me.Col + [double]$me.Span / 2.0
+    $cy = [double]$me.Row + [double]$me.Span / 2.0
+    $best = ''
+    $bestScore = [double]::MaxValue
+    foreach ($nm in @($P.Items | ForEach-Object { [string]$_.Name })) {
+        if ($nm -eq $cur) { continue }
+        if (-not $plan.Positions.ContainsKey($nm)) { continue }
+        $o = $plan.Positions[$nm]
+        $ox = [double]$o.Col + [double]$o.Span / 2.0
+        $oy = [double]$o.Row + [double]$o.Span / 2.0
+        $dc = $ox - $cx
+        $dr = $oy - $cy
+        if ($DeltaCol -lt 0 -and $dc -ge -0.1) { continue }
+        if ($DeltaCol -gt 0 -and $dc -le 0.1) { continue }
+        if ($DeltaRow -lt 0 -and $dr -ge -0.1) { continue }
+        if ($DeltaRow -gt 0 -and $dr -le 0.1) { continue }
+        # 主轴距离优先，垂直方向的偏差做惩罚（尽量挑同一行/同一列的）
+        $primary = ([Math]::Abs($dc) * [Math]::Abs($DeltaCol)) + ([Math]::Abs($dr) * [Math]::Abs($DeltaRow))
+        $cross = ([Math]::Abs($dr) * [Math]::Abs($DeltaCol)) + ([Math]::Abs($dc) * [Math]::Abs($DeltaRow))
+        $score = $primary + 0.45 * $cross
+        if ($score -lt $bestScore) { $bestScore = $score; $best = $nm }
+    }
+    if (-not $best) { return $false }
+    $P.Selected = @{}
+    $P.Selected[$best] = $true
+    $P.Anchor = $best
+    Update-PadSelectionVisual -PadId $P.Id
+    return $true
 }
 function Show-PadDropPreview {
     param($P, [int]$Index)
@@ -4924,7 +4957,11 @@ function Start-FPTimers {
                         elseif ($vkHook -eq 0x25) { $dcH = -1 }
                         elseif ($vkHook -eq 0x27) { $dcH = 1 }
                         if ($dcH -ne 0 -or $drH -ne 0) {
-                            Move-PadSelectionByStep -P $ppH -DeltaCol $dcH -DeltaRow $drH
+                            $okH = Move-PadSelectionByStep -P $ppH -DeltaCol $dcH -DeltaRow $drH -Swap:$alt
+                            if (-not $okH) {
+                                # 挪不动 → 把选中交给这个方向的邻居（继续按就能一路走过去）
+                                [void](Select-PadNeighbor -P $ppH -DeltaCol $dcH -DeltaRow $drH)
+                            }
                             $hookMoved = $true
                         }
                     }
@@ -4946,13 +4983,14 @@ function Start-FPTimers {
                             $inA = ($lx -ge 0 -and $lx -le [double]$ppA.Width -and $ly -ge 0 -and $ly -le ([double]$script:TitleHeight + [double]$ppA.Rows * [double]$script:Grid.CellH))
                             # 带修饰键时不当成"调位置"（Ctrl/Alt/Shift 留给别处）
                             $shiftA = ([FPNative]::GetAsyncKeyState(0x10) -band 0x8000) -ne 0
-                            if ($inA -and -not ($ctrl -or $alt -or $shiftA)) {
+                            if ($inA -and -not ($ctrl -or $shiftA)) {
                                 $dcA = 0; $drA = 0
                                 if (([FPNative]::GetAsyncKeyState(0x26) -band 0x8000) -ne 0) { $drA = -1 }
                                 elseif (([FPNative]::GetAsyncKeyState(0x28) -band 0x8000) -ne 0) { $drA = 1 }
                                 elseif (([FPNative]::GetAsyncKeyState(0x25) -band 0x8000) -ne 0) { $dcA = -1 }
                                 elseif (([FPNative]::GetAsyncKeyState(0x27) -band 0x8000) -ne 0) { $dcA = 1 }
-                                Move-PadSelectionByStep -P $ppA -DeltaCol $dcA -DeltaRow $drA
+                                $okA = Move-PadSelectionByStep -P $ppA -DeltaCol $dcA -DeltaRow $drA -Swap:$alt
+                                if (-not $okA) { [void](Select-PadNeighbor -P $ppA -DeltaCol $dcA -DeltaRow $drA) }
                             }
                         }
                     }
@@ -5361,6 +5399,44 @@ function Invoke-SelfTest {
         $okSwap = ([int]$cc['a'].c -eq 1 -and [int]$cc['b'].c -eq 0)
         Test-Assert '自由位置：1×1 之间换位' $okSwap ("a={0} b={1}" -f $cc['a'].c, $cc['b'].c)
     } catch { Test-Assert '自由位置' $false $_.Exception.Message }
+
+    # 17. 方向键导航：挪不动时把选中交给邻居
+    try {
+        $fakePos = @{
+            'a' = @{ Col = 0; Row = 0; Span = 1 }
+            'b' = @{ Col = 1; Row = 0; Span = 1 }
+            'c' = @{ Col = 0; Row = 1; Span = 1 }
+            'd' = @{ Col = 1; Row = 1; Span = 1 }
+        }
+        $mkPad = {
+            param($sel)
+            @{
+                Id = 't'; Canvas = $null; Anchor = ''
+                Items = @([pscustomobject]@{ Name = 'a' }, [pscustomobject]@{ Name = 'b' }, [pscustomobject]@{ Name = 'c' }, [pscustomobject]@{ Name = 'd' })
+                Plan = @{ Positions = $fakePos }
+                Selected = $sel
+                Data = @{ cells = @{ 'a' = @{ c = 0; r = 0 }; 'b' = @{ c = 1; r = 0 }; 'c' = @{ c = 0; r = 1 }; 'd' = @{ c = 1; r = 1 } }; big = @() }
+            }
+        }
+        $p1 = & $mkPad @{ 'b' = $true }
+        $okL = Select-PadNeighbor -P $p1 -DeltaCol -1 -DeltaRow 0
+        $gotL = [string](@($p1.Selected.Keys)[0])
+        Test-Assert '导航：按 ← 选中跳到左边邻居' ($okL -and $gotL -eq 'a') ("选中=" + $gotL)
+
+        $p2 = & $mkPad @{ 'a' = $true }
+        $okD = Select-PadNeighbor -P $p2 -DeltaCol 0 -DeltaRow 1
+        $gotD = [string](@($p2.Selected.Keys)[0])
+        Test-Assert '导航：按 ↓ 选中跳到下边邻居' ($okD -and $gotD -eq 'c') ("选中=" + $gotD)
+
+        $p3 = & $mkPad @{ 'c' = $true }
+        $okNone = Select-PadNeighbor -P $p3 -DeltaCol -1 -DeltaRow 0
+        Test-Assert '导航：左边没东西时不动' (-not $okNone) ''
+
+        # 被挡住时 Move 要返回 false（交给导航），不能自己交换
+        $p4 = & $mkPad @{ 'a' = $true }
+        $okMove = Move-PadSelectionByStep -P $p4 -DeltaCol 1 -DeltaRow 0
+        Test-Assert '移动：被挡住返回 false（不自动交换）' (-not $okMove) ''
+    } catch { Test-Assert '方向键导航' $false $_.Exception.Message }
 
     try { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
 
