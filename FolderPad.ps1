@@ -86,6 +86,7 @@ $script:PadFreeLayout      = $true   # false = 退回纯网格（忽略 big / ro
 $script:BigItemSpan        = 2       # 放大突出的大格占几格（固定 2×2）
 $script:BigIconScale       = 2       # 大格图标 = 普通图标 × 这个倍数
 $script:ReorderByDrag      = $false  # 框内拖动排序（默认关：改用手感更好的方向键）
+$script:HideJunkFiles      = $true   # 不显示 ~$xxx.docx（Office/WPS 临时锁文件）、Thumbs.db、desktop.ini
 
 $script:State      = $null
 $script:Pads       = @{}      # id -> 运行时对象（窗口、控件、条目）
@@ -736,6 +737,19 @@ function Get-FileIconSource {
     }
 }
 
+function Test-PadJunkName {
+    param([string]$Name)
+    # Office/WPS 打开文档时会生成 ~$文件名 的锁文件；系统还会生成 Thumbs.db / desktop.ini
+    # 这些都不是用户内容，框里默认不显示（跟资源管理器的默认行为一致）
+    if (-not $script:HideJunkFiles) { return $false }
+    $n = [string]$Name
+    if (-not $n) { return $false }
+    if ($n.StartsWith('~$')) { return $true }
+    if ($n -eq 'Thumbs.db') { return $true }
+    if ($n -eq 'desktop.ini') { return $true }
+    return $false
+}
+
 function Get-PadItems {
     param($Pad)
     $res = @{ Ok = $false; Items = @(); Dirs = 0; Files = 0; Error = ''; Big = @{} }
@@ -762,6 +776,8 @@ function Get-PadItems {
         }
     }
     $items = @($items)
+    # 过滤掉 Office/WPS 临时锁文件与系统垃圾文件（~$xxx.docx / Thumbs.db / desktop.ini）
+    $items = @($items | Where-Object { -not (Test-PadJunkName ([string]$_.Name)) })
     # 自然顺序：文件夹优先 + 名称（新增条目按这个顺序追加到 order 末尾）
     $natural = @($items | Sort-Object @{ Expression = { if ($_.IsDir) { 0 } else { 1 } } }, @{ Expression = { $_.Name } })
     $norm = Normalize-PadOrder -Pad $Pad -Names @($natural | ForEach-Object { $_.Name })
