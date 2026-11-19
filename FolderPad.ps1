@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:AppName    = 'FolderPad'
-$script:AppVersion = '1.2.0'
+$script:AppVersion = '1.2.1'
 $script:AppDir     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:DataDir           = Join-Path $env:APPDATA 'FolderPad'
@@ -201,6 +201,10 @@ public static class FPNative
     public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FPRECT { public int L; public int T; public int R; public int B; }
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out FPRECT r);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindow(string cls, string title);
     [DllImport("user32.dll")]
@@ -264,6 +268,122 @@ public static class FPNative
     public static uint DpiForWindow(IntPtr hwnd)
     {
         try { return GetDpiForWindow(hwnd); } catch { return 96; }
+    }
+}
+
+// 低层键盘钩子：在"框里有选中项 + 鼠标停在框上 + 前台是桌面"时吞掉方向键，
+// 免得框内挪图标的同时把桌面的图标也选中了
+public static class FPKeyHook
+{
+    const int WH_KEYBOARD_LL = 13;
+    const int WM_KEYDOWN = 0x0100;
+    const int WM_SYSKEYDOWN = 0x0104;
+
+    delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")]
+    static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr GetModuleHandle(string lpModuleName);
+    [DllImport("user32.dll")]
+    static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")]
+    static extern bool GetCursorPos(out FPPOINT pt);
+
+    static IntPtr _hook = IntPtr.Zero;
+    static LowLevelKeyboardProc _proc = null;
+
+    public static bool Enabled = false;
+
+    // 被吞掉的方向键记在这里，主循环用 TakeKey() 取走（吞掉后 GetAsyncKeyState 看不到）
+    static int _pendingKey = 0;
+    public static int TakeKey()
+    {
+        int k = _pendingKey;
+        _pendingKey = 0;
+        return k;
+    }
+    public static int RLeft = 0, RTop = 0, RRight = 0, RBottom = 0;
+
+    public static void SetRect(int l, int t, int r, int b)
+    {
+        RLeft = l; RTop = t; RRight = r; RBottom = b;
+        Enabled = (r > l && b > t);
+    }
+
+    public static void Clear() { Enabled = false; }
+
+    public static bool Install()
+    {
+        try
+        {
+            if (_hook != IntPtr.Zero) return true;
+            _proc = new LowLevelKeyboardProc(HookProc);
+            IntPtr hMod = GetModuleHandle(null);
+            _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, hMod, 0);
+            return _hook != IntPtr.Zero;
+        }
+        catch { return false; }
+    }
+
+    public static void Uninstall()
+    {
+        try
+        {
+            if (_hook != IntPtr.Zero) { UnhookWindowsHookEx(_hook); _hook = IntPtr.Zero; }
+            _proc = null;
+            Enabled = false;
+        }
+        catch { }
+    }
+
+    static bool ForegroundIsDesktop()
+    {
+        try
+        {
+            IntPtr fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero) return false;
+            var sb = new System.Text.StringBuilder(256);
+            GetClassName(fg, sb, 256);
+            string cls = sb.ToString();
+            return (cls == "Progman" || cls == "WorkerW" || cls == "SHELLDLL_DefView");
+        }
+        catch { return false; }
+    }
+
+    static IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        try
+        {
+            if (nCode >= 0 && Enabled)
+            {
+                int msg = wParam.ToInt32();
+                if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+                {
+                    int vk = Marshal.ReadInt32(lParam);
+                    if (vk == 0x25 || vk == 0x26 || vk == 0x27 || vk == 0x28)
+                    {
+                        FPPOINT pt;
+                        if (GetCursorPos(out pt)
+                            && pt.X >= RLeft && pt.X <= RRight
+                            && pt.Y >= RTop && pt.Y <= RBottom
+                            && ForegroundIsDesktop())
+                        {
+                            _pendingKey = vk;
+                            return (IntPtr)1;   // 吞掉，桌面收不到
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+        return CallNextHookEx(_hook, nCode, wParam, lParam);
     }
 }
 
@@ -4754,10 +4874,42 @@ function Start-FPTimers {
                     }
                 } else { $script:HotLatch = $false }
 
-                # 方向键调整顺序：↑/← 前移一位，↓/→ 后移一位
+                # 更新方向键钩子的生效范围：有选中项的框 + 鼠标在其矩形内 + 前台是桌面时才吞方向键
+                try {
+                    $ppHook = Get-PadSelectionPad
+                    if ($ppHook -and $ppHook.Window) {
+                        $hwndH = ([System.Windows.Interop.WindowInteropHelper]::new($ppHook.Window)).Handle
+                        if ($hwndH -ne [IntPtr]::Zero) {
+                            $rc = New-Object FPNative+FPRECT
+                            if ([FPNative]::GetWindowRect($hwndH, [ref]$rc)) {
+                                [FPKeyHook]::SetRect($rc.L, $rc.T, $rc.R, $rc.B)
+                            } else { [FPKeyHook]::Clear() }
+                        }
+                    } else { [FPKeyHook]::Clear() }
+                } catch { }
+
+                # 方向键调整位置：↑/← 前移一位，↓/→ 后移一位
                 # 触发条件：有选中项 + 鼠标停在该框上 + 前台是桌面（避免打字时误伤）
+                $hookMoved = $false
+                $vkHook = 0
+                try { $vkHook = [FPKeyHook]::TakeKey() } catch { }
+                if ($vkHook -ne 0) {
+                    $ppH = Get-PadSelectionPad
+                    if ($ppH) {
+                        $dcH = 0; $drH = 0
+                        if ($vkHook -eq 0x26) { $drH = -1 }
+                        elseif ($vkHook -eq 0x28) { $drH = 1 }
+                        elseif ($vkHook -eq 0x25) { $dcH = -1 }
+                        elseif ($vkHook -eq 0x27) { $dcH = 1 }
+                        if ($dcH -ne 0 -or $drH -ne 0) {
+                            Move-PadSelectionByStep -P $ppH -DeltaCol $dcH -DeltaRow $drH
+                            $hookMoved = $true
+                        }
+                    }
+                }
                 $move = 0
-                if (([FPNative]::GetAsyncKeyState(0x26) -band 0x8000) -ne 0) { $move = -1 }
+                if ($hookMoved) { }
+                elseif (([FPNative]::GetAsyncKeyState(0x26) -band 0x8000) -ne 0) { $move = -1 }
                 elseif (([FPNative]::GetAsyncKeyState(0x28) -band 0x8000) -ne 0) { $move = 1 }
                 elseif (([FPNative]::GetAsyncKeyState(0x25) -band 0x8000) -ne 0) { $move = -1 }
                 elseif (([FPNative]::GetAsyncKeyState(0x27) -band 0x8000) -ne 0) { $move = 1 }
@@ -4782,6 +4934,7 @@ function Start-FPTimers {
                             }
                         }
                     }
+                } else { $script:ArrowLatch = $false
                 } else { $script:ArrowLatch = $false }
 
                 # 左键刚按下：落点不在任何框里 → 取消所有选中（桌面习惯）
@@ -4858,6 +5011,7 @@ function Exit-FolderPad {
     try { if ($script:TimerFast) { $script:TimerFast.Stop() } } catch { }
     try { if ($script:TimerHot) { $script:TimerHot.Stop() } } catch { }
     try { if ($script:TimerSlow) { $script:TimerSlow.Stop() } } catch { }
+    try { [FPKeyHook]::Uninstall() } catch { }
     try { if ($script:Tray) { $script:Tray.Visible = $false; $script:Tray.Dispose() } } catch { }
     try { if ($script:Mutex) { $script:Mutex.ReleaseMutex() } } catch { }
     try { if ($script:WpfApp) { $script:WpfApp.Shutdown() } } catch { }
@@ -4896,6 +5050,9 @@ function Start-FolderPadApp {
 
     Invoke-StartupSelfCheck
     New-TrayIcon
+    try {
+        if ([FPKeyHook]::Install()) { Write-Log '方向键钩子已安装' } else { Write-Log '方向键钩子安装失败（方向键可用，但会同时动桌面）' 'WARN' }
+    } catch { Write-Log "方向键钩子异常: $($_.Exception.Message)" 'WARN' }
     Start-FPTimers
 
     if (-not $script:State.settings.hideAll) {
