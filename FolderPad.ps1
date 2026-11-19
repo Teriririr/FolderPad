@@ -82,6 +82,9 @@ $script:BorderWidth        = 0     # 不再画彩色边框：紧急度色铺进�
 $script:DefaultFill        = 0.40  # 框内底色不透明度（紧急度色的透明度）
 $script:MaxAutoCols        = 8
 $script:FontFamily         = 'Microsoft YaHei UI'
+$script:PadFreeLayout      = $true   # false = 退回纯网格（忽略 big / rows），出问题时的兜底开关
+$script:BigItemSpan        = 2       # 放大突出的大格占几格（固定 2×2）
+$script:BigIconScale       = 2       # 大格图标 = 普通图标 × 这个倍数
 
 $script:State      = $null
 $script:Pads       = @{}      # id -> 运行时对象（窗口、控件、条目）
@@ -582,13 +585,14 @@ function Get-UrgencyInfo {
 # 图标
 # =====================================================================
 function Get-FileIconSource {
-    param([string]$Path, [bool]$IsDir)
-    $key = ('{0}|{1}|{2}' -f $IsDir, [int]$script:Grid.Raw.Icon, $Path.ToLowerInvariant())
+    param([string]$Path, [bool]$IsDir, [int]$WantSize = 0)
+    $want = 48
+    if ($script:Grid.Raw) { $want = [int]$script:Grid.Raw.Icon }
+    if ($WantSize -gt 0) { $want = [int]$WantSize }
+    $key = ('{0}|{1}|{2}' -f $IsDir, $want, $Path.ToLowerInvariant())
     if ($script:IconCache.ContainsKey($key)) { return $script:IconCache[$key] }
     $hIcon = [IntPtr]::Zero
     try {
-        $want = 48
-        if ($script:Grid.Raw) { $want = [int]$script:Grid.Raw.Icon }
         $hIcon = [FPNative]::GetIconByIndex($Path, $want)
         if ($hIcon -eq [IntPtr]::Zero) { $hIcon = [FPNative]::GetLargeIcon($Path) }
         if ($hIcon -eq [IntPtr]::Zero) { return $null }
@@ -609,7 +613,7 @@ function Get-FileIconSource {
 
 function Get-PadItems {
     param($Pad)
-    $res = @{ Ok = $false; Items = @(); Dirs = 0; Files = 0; Error = '' }
+    $res = @{ Ok = $false; Items = @(); Dirs = 0; Files = 0; Error = ''; Big = @{} }
     if ($null -eq $Pad -or -not $Pad.path) { $res.Error = '路径为空'; return $res }
     if (-not (Test-Path -LiteralPath $Pad.path -PathType Container)) {
         $res.Error = '路径失效'
@@ -633,12 +637,21 @@ function Get-PadItems {
         }
     }
     $items = @($items)
-    $order = @()
-    if ($Pad.order) { $order = @($Pad.order) }
+    # 自然顺序：文件夹优先 + 名称（新增条目按这个顺序追加到 order 末尾）
+    $natural = @($items | Sort-Object @{ Expression = { if ($_.IsDir) { 0 } else { 1 } } }, @{ Expression = { $_.Name } })
+    $norm = Normalize-PadOrder -Pad $Pad -Names @($natural | ForEach-Object { $_.Name })
+    $Pad.order = @($norm.Order)
+    $Pad.big = @($norm.Big)
+    $pos = @{}
+    $i = 0
+    foreach ($nm in @($norm.Order)) { $pos[[string]$nm] = $i; $i++ }
     $items = @($items | Sort-Object @{ Expression = {
-                $idx = [array]::IndexOf($order, $_.Name)
-                if ($idx -lt 0) { 9999 } else { $idx }
-            } }, @{ Expression = { if ($_.IsDir) { 0 } else { 1 } } }, @{ Expression = { $_.Name } })
+                $idx = 9999
+                if ($pos.ContainsKey([string]$_.Name)) { $idx = [int]$pos[[string]$_.Name] }
+                $idx
+            } })
+    $res.Big = @{}
+    foreach ($bn in @($norm.Big)) { $res.Big[[string]$bn] = $true }
     $res.Ok = $true
     $res.Items = $items
     $res.Dirs = @($items | Where-Object { $_.IsDir }).Count
@@ -771,6 +784,8 @@ function Load-State {
         if (-not $pad.Contains('categoryColorOn')) { $pad.categoryColorOn = $true }
         if (-not $pad.Contains('pinned')) { $pad.pinned = $false }
         if (-not $pad.Contains('order') -or $null -eq $pad.order) { $pad.order = @() }
+        if (-not $pad.Contains('big') -or $null -eq $pad.big) { $pad.big = @() }
+        if (-not $pad.Contains('rows') -or $null -eq $pad.rows -or [string]::IsNullOrWhiteSpace([string]$pad.rows)) { $pad.rows = 'auto' }
         if (-not $pad.Contains('prevHidden')) { $pad.prevHidden = $false }
         if (-not $pad.Contains('prevAttrs')) { $pad.prevAttrs = -1 }
         if (-not $pad.Contains('invalid')) { $pad.invalid = $false }
@@ -1130,6 +1145,8 @@ function Convert-ToPad {
         prevAttrs       = $attrs
         createdAt       = (Get-Date).ToString('s')
         order           = @()
+        big             = @()
+        rows            = 'auto'
         invalid         = $false
     }
     $script:State.pads = @($script:State.pads) + $pad
@@ -1505,6 +1522,24 @@ function Show-CustomDialog {
 
     $win.Add_MouseLeftButtonDown({
             param($s, $e)
+            # 只有点在空白/背景上才拖动窗口；点在控件上交给控件自己处理
+            # （否则单选/复选按钮、文本框里的拖选会被 DragMove 吞掉）
+            $interactive = $false
+            try {
+                $node = $e.OriginalSource
+                for ($i = 0; $i -lt 14 -and $null -ne $node; $i++) {
+                    $tn = $node.GetType().Name
+                    if ($tn -match 'RadioButton|CheckBox|Button|TextBox|TextBoxView|ComboBox|Slider|ScrollBar|ScrollViewer|ListBox|PasswordBox|Hyperlink') { $interactive = $true; break }
+                    $next = $null
+                    try { $next = [System.Windows.Media.VisualTreeHelper]::GetParent($node) } catch { }
+                    if ($null -eq $next) {
+                        try { $next = $node.Parent } catch { }
+                    }
+                    if ($null -eq $next) { break }
+                    $node = $next
+                }
+            } catch { }
+            if ($interactive) { return }
             try { $s.DragMove() } catch { }
         })
     $win.Add_SourceInitialized({
@@ -1887,7 +1922,9 @@ function Show-PadWindow {
         Ok         = $false
         Busy       = $false
         CtxOpen    = $false
-        Selected   = $null
+        Selected   = @{}        # 选中的条目名集合（HashSet 语义用 hashtable 实现）
+        Anchor     = ''          # Shift 连选的锚点条目名
+        Plan       = $null       # 打包结果（Get-PadPlan）
         LayingOut  = $false
         DragFrom   = $null
         DragPoint  = $null
@@ -2399,6 +2436,95 @@ function Set-PadDueText {
     $p.DueText.ToolTip = [string]$u.Text
 }
 
+function Normalize-PadOrder {
+    param($Pad, [string[]]$Names)
+    # 把 pad.order / pad.big 与磁盘上的真实条目对齐：
+    #  - order：去掉不存在的、去重，新增的按传入顺序（自然顺序）补到末尾
+    #  - big  ：去掉不存在的
+    $real = @{}
+    foreach ($n in @($Names)) { if ($n) { $real[[string]$n] = $true } }
+    $order = New-Object System.Collections.ArrayList
+    $seen = @{}
+    foreach ($n in @($Pad.order)) {
+        $s = [string]$n
+        if (-not $s) { continue }
+        if (-not $real.ContainsKey($s)) { continue }
+        if ($seen.ContainsKey($s)) { continue }
+        $seen[$s] = $true
+        [void]$order.Add($s)
+    }
+    foreach ($n in @($Names)) {
+        $s = [string]$n
+        if (-not $s) { continue }
+        if ($seen.ContainsKey($s)) { continue }
+        $seen[$s] = $true
+        [void]$order.Add($s)
+    }
+    $big = @()
+    foreach ($n in @($Pad.big)) {
+        $s = [string]$n
+        if (-not $s) { continue }
+        if (-not $real.ContainsKey($s)) { continue }
+        $big += $s
+    }
+    return @{ Order = @($order.ToArray()); Big = @($big) }
+}
+
+function Get-PadPlan {
+    param(
+        [string[]]$Order = @(),
+        [string[]]$Big = @(),
+        [int]$Cols = 1
+    )
+    # 占位打包：按 Order 顺序 first-fit 放到 Cols 列的网格里，大格占 $script:BigItemSpan²
+    # 返回 @{ Positions = @{ 名字 = @{ Col; Row; Span } }; Cols; Rows; ForcedCols }
+    $span = [int]$script:BigItemSpan
+    if ($span -lt 2) { $span = 2 }
+    $bigSet = @{}
+    foreach ($b in @($Big)) { if ($b) { $bigSet[[string]$b] = $true } }
+    if ($Cols -lt 1) { $Cols = 1 }
+    $forced = $false
+    if ($bigSet.Count -gt 0 -and $Cols -lt $span) { $Cols = $span; $forced = $true }
+    if (-not $script:PadFreeLayout) { $bigSet = @{} }   # 兜底开关：关掉后一律按 1×1 排
+
+    $occ = @{}
+    $pos = @{}
+    $maxRow = 0
+    foreach ($name in @($Order)) {
+        $nm = [string]$name
+        if (-not $nm) { continue }
+        $sp = 1
+        if ($bigSet.ContainsKey($nm)) { $sp = $span }
+        $row = 0
+        $placed = $false
+        while (-not $placed -and $row -le 4096) {
+            for ($col = 0; $col -le ($Cols - $sp); $col++) {
+                $free = $true
+                for ($dx = 0; $dx -lt $sp -and $free; $dx++) {
+                    for ($dy = 0; $dy -lt $sp -and $free; $dy++) {
+                        if ($occ.ContainsKey(('{0},{1}' -f ($col + $dx), ($row + $dy)))) { $free = $false }
+                    }
+                }
+                if ($free) {
+                    for ($dx = 0; $dx -lt $sp; $dx++) {
+                        for ($dy = 0; $dy -lt $sp; $dy++) {
+                            $occ[('{0},{1}' -f ($col + $dx), ($row + $dy))] = $true
+                        }
+                    }
+                    $pos[$nm] = @{ Col = $col; Row = $row; Span = $sp }
+                    if (($row + $sp) -gt $maxRow) { $maxRow = $row + $sp }
+                    $placed = $true
+                    break
+                }
+            }
+            $row++
+        }
+    }
+    $rows = $maxRow
+    if ($rows -lt 1) { $rows = 1 }
+    return @{ Positions = $pos; Cols = $Cols; Rows = $rows; ForcedCols = $forced }
+}
+
 function Update-PadLayout {
     param([string]$PadId)
     $p = $script:Pads[$PadId]
@@ -2414,21 +2540,34 @@ function Update-PadLayout {
         $maxCols = [int][Math]::Floor($avail / $cw)
         if ($maxCols -lt 1) { $maxCols = 1 }
         if ($maxCols -gt $script:MaxAutoCols) { $maxCols = $script:MaxAutoCols }
-        $cols = 1
-        switch ([string]$p.Data.cols) {
-            '1' { $cols = 1 }
-            '2' { $cols = 2 }
-            default {
-                $cols = [Math]::Min($count, $maxCols)
-                if ($cols -lt 1) { $cols = 1 }
-            }
+
+        # 列数 / 行数：谁被显式设置谁说了算；都 auto 就"尽量一行"
+        $wantCols = 0
+        $wantRows = 0
+        if ([string]$p.Data.cols -match '^\d+$') { $wantCols = [int]$p.Data.cols }
+        if ($script:PadFreeLayout -and [string]$p.Data.rows -match '^\d+$') { $wantRows = [int]$p.Data.rows }
+        if ($wantCols -gt 0) {
+            $cols = $wantCols
+        } elseif ($wantRows -gt 0) {
+            $cols = [int][Math]::Ceiling($count / [Math]::Max(1, $wantRows))
+            if ($cols -lt 1) { $cols = 1 }
+            if ($cols -gt $script:MaxAutoCols) { $cols = $script:MaxAutoCols }
+        } else {
+            $cols = [Math]::Min($count, $maxCols)
         }
-        $rows = [int][Math]::Ceiling($count / $cols)
-        if ($rows -lt 1) { $rows = 1 }
-        $w = $cols * $cw + 2 * $script:BorderWidth
-        $h = $script:TitleHeight + $rows * $ch + 2 * $script:BorderWidth
-        $p.Cols = $cols
-        $p.Rows = $rows
+        if ($cols -lt 1) { $cols = 1 }
+
+        $bigNames = @()
+        if ($script:PadFreeLayout) { $bigNames = @($p.Data.big) }
+        $names = @($p.Items | ForEach-Object { [string]$_.Name })
+        $plan = Get-PadPlan -Order $names -Big $bigNames -Cols $cols
+        $p.Plan = $plan
+        $p.Cols = [int]$plan.Cols
+        $p.Rows = [int]$plan.Rows
+        $p.ForcedCols = [bool]$plan.ForcedCols
+
+        $w = $p.Cols * $cw + 2 * $script:BorderWidth
+        $h = $script:TitleHeight + $p.Rows * $ch + 2 * $script:BorderWidth
         $p.Width = $w
         Set-PadBounds -P $p -X $p.Data.pos.x -Y $p.Data.pos.y -W $w -H $h
         Build-PadCells -PadId $PadId
@@ -2442,22 +2581,28 @@ function Build-PadCells {
     param([string]$PadId)
     $p = $script:Pads[$PadId]
     if ($null -eq $p) { return }
-    $p.Selected = $null
     $p.Canvas.Children.Clear()
     $cw = $script:Grid.CellW
     $ch = $script:Grid.CellH
-    $cols = [int]$p.Cols
-    if ($cols -lt 1) { $cols = 1 }
-    $i = 0
+    $plan = $p.Plan
+    if ($null -eq $plan) {
+        $plan = Get-PadPlan -Order @($p.Items | ForEach-Object { [string]$_.Name }) -Big @($p.Data.big) -Cols ([Math]::Max(1, [int]$p.Cols))
+        $p.Plan = $plan
+    }
     foreach ($item in @($p.Items)) {
-        $col = $i % $cols
-        $row = [int][Math]::Floor($i / $cols)
-        $cell = New-PadCell -PadId $PadId -Item $item
+        $col = 0; $row = 0; $span = 1
+        $nm = [string]$item.Name
+        if ($plan.Positions.ContainsKey($nm)) {
+            $pp = $plan.Positions[$nm]
+            $col = [int]$pp.Col; $row = [int]$pp.Row; $span = [int]$pp.Span
+        }
+        $cell = New-PadCell -PadId $PadId -Item $item -Span $span
         [System.Windows.Controls.Canvas]::SetLeft($cell, $col * $cw)
         [System.Windows.Controls.Canvas]::SetTop($cell, $row * $ch)
         [void]$p.Canvas.Children.Add($cell)
-        $i++
     }
+    Update-PadSelectionVisual -PadId $PadId
+
     if (-not $p.Ok) {
         $tb = New-Object System.Windows.Controls.TextBlock
         $tb.Text = "路径失效`n右键可重新定位"
@@ -2477,44 +2622,50 @@ function Build-PadCells {
 }
 
 function New-PadCell {
-    param([string]$PadId, $Item)
+    param([string]$PadId, $Item, [int]$Span = 1)
     $cw = $script:Grid.CellW
     $ch = $script:Grid.CellH
+    $isBig = ($Span -gt 1)
     $iconSize = $script:Grid.Icon
+    if ($isBig) { $iconSize = [Math]::Round($script:Grid.Icon * $script:BigIconScale, 0) }
 
     $cell = New-Object System.Windows.Controls.Border
-    $cell.Width = $cw
-    $cell.Height = $ch
+    $cell.Width = $cw * $Span
+    $cell.Height = $ch * $Span
     $cell.CornerRadius = '5'
     $cell.Background = New-FPBrush '#FFFFFF' 0.035
     $cell.BorderThickness = '1'
     $cell.BorderBrush = New-FPBrush '#000000' 0.0
     $cell.Cursor = 'Hand'
-    $cell.ToolTip = $Item.FullName
+    $cell.ToolTip = [string]$Item.FullName
     $cell.Uid = $PadId
     $cell.Tag = $Item
+    $cell.DataContext = [string]$Item.Name
 
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.VerticalAlignment = 'Center'
-    $sp.Margin = '3,4,3,2'
+    if ($isBig) { $sp.Margin = '4,6,4,4' } else { $sp.Margin = '3,4,3,2' }
 
     $img = New-Object System.Windows.Controls.Image
     $img.Width = $iconSize
     $img.Height = $iconSize
     $img.Stretch = 'Uniform'
     try { [System.Windows.Media.RenderOptions]::SetBitmapScalingMode($img, [System.Windows.Media.BitmapScalingMode]::HighQuality) } catch { }
-    $src = Get-FileIconSource -Path $Item.FullName -IsDir $Item.IsDir
+    $src = $null
+    if ($isBig) { $src = Get-FileIconSource -Path $Item.FullName -IsDir $Item.IsDir -WantSize ([int]$iconSize) }
+    if (-not $src) { $src = Get-FileIconSource -Path $Item.FullName -IsDir $Item.IsDir }
     if ($src) { $img.Source = $src }
-
     [void]$sp.Children.Add($img)
 
     $tb = New-Object System.Windows.Controls.TextBlock
-    $tb.Text = $Item.Name
+    $tb.Text = [string]$Item.Name
     $tb.FontSize = 11.5
+    if ($isBig) { $tb.FontSize = 12.5 }
     $tb.Foreground = New-FPBrush '#FFFFFF' 0.96
     $tb.TextAlignment = 'Center'
     $tb.TextWrapping = 'Wrap'
     $tb.MaxHeight = 31
+    if ($isBig) { $tb.MaxHeight = 34 }
     $tb.Margin = '0,4,0,0'
     $tb.LineHeight = 14.5
     $sh = New-Object System.Windows.Media.Effects.DropShadowEffect
@@ -2531,14 +2682,31 @@ function New-PadCell {
             $id = [string]$s.Uid
             $pp = $script:Pads[$id]
             if ($null -eq $pp) { return }
-            Select-PadCell -PadId $id -Cell $s
+            $itemName = [string]$s.DataContext
+            $mods = [System.Windows.Input.Keyboard]::Modifiers
+            $ctrl = ($mods -band [System.Windows.Input.ModifierKeys]::Control) -ne 0
+            $shift = ($mods -band [System.Windows.Input.ModifierKeys]::Shift) -ne 0
             if ($e.ClickCount -eq 2) {
+                Clear-AllPadSelection
                 Open-PadItem -PadId $id -Item $s.Tag
+                $e.Handled = $true
                 return
+            }
+            if ($ctrl) {
+                Toggle-PadCellSelection -PadId $id -Name $itemName
+            } elseif ($shift) {
+                Select-PadRange -PadId $id -Name $itemName
+            } else {
+                if (-not $pp.Selected.ContainsKey($itemName)) {
+                    Select-PadCell -PadId $id -Cell $s
+                } else {
+                    $pp.Anchor = $itemName
+                }
             }
             $pp.DragFrom = $s.Tag
             $pp.DragPoint = Get-CursorDip
-            # 吃掉事件：否则会冒泡到画布的"取消选中"，刚选上就被清掉
+            $pp.DragNames = @($pp.Selected.Keys)
+            $pp.DragOrderMode = $false
             $e.Handled = $true
         })
     $cell.Add_MouseMove({
@@ -2549,31 +2717,222 @@ function New-PadCell {
             if ($e.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) { return }
             $cur = Get-CursorDip
             if ([Math]::Abs($cur.x - $pp.DragPoint.x) -lt 6 -and [Math]::Abs($cur.y - $pp.DragPoint.y) -lt 6) { return }
-            $full = $pp.DragFrom.FullName
+            $local = Get-PadLocalPoint -P $pp -Point $cur
+            $inside = Test-PadContentPoint -P $pp -Local $local
+            if ($inside) {
+                $pp.DragOrderMode = $true
+                $idx = Find-PadInsertIndex -P $pp -LocalX $local.x -LocalY $local.y
+                Show-PadDropPreview -P $pp -Index $idx
+            } else {
+                Hide-PadDropPreview -P $pp
+                $names = @($pp.DragNames)
+                $pp.DragFrom = $null
+                $pp.DragPoint = $null
+                $pp.DragNames = @()
+                $pp.DragOrderMode = $false
+                Start-PadDragOut -PadId $id -Names $names
+            }
+        })
+    $cell.Add_MouseLeftButtonUp({
+            param($s, $e)
+            $id = [string]$s.Uid
+            $pp = $script:Pads[$id]
+            if ($null -eq $pp) { return }
+            $wasReorder = [bool]$pp.DragOrderMode
+            $names = @($pp.DragNames)
             $pp.DragFrom = $null
             $pp.DragPoint = $null
-            Start-PadDragOut -PadId $id -FullPath $full
+            $pp.DragNames = @()
+            $pp.DragOrderMode = $false
+            if (-not $wasReorder) { Hide-PadDropPreview -P $pp; return }
+            $cur = Get-CursorDip
+            $local = Get-PadLocalPoint -P $pp -Point $cur
+            Hide-PadDropPreview -P $pp
+            if (@($names).Count -eq 0) { return }
+            $idx = Find-PadInsertIndex -P $pp -LocalX $local.x -LocalY $local.y
+            Move-PadItemsToIndex -P $pp -Names $names -Index $idx
         })
     $cell.Add_MouseRightButtonUp({
             param($s, $e)
             $e.Handled = $true
             $id = [string]$s.Uid
-            Select-PadCell -PadId $id -Cell $s
+            $pp = $script:Pads[$id]
+            if ($null -eq $pp) { return }
+            $nm = [string]$s.DataContext
+            if (-not $pp.Selected.ContainsKey($nm)) { Select-PadCell -PadId $id -Cell $s }
             Show-ItemMenu -PadId $id -Item $s.Tag
         })
 
     return $cell
 }
 
+function Get-PadLocalPoint {
+    param($P, $Point)
+    # 屏幕 DIP → 框内相对坐标（含标题条）
+    $x = [double]$Point.x - [double]$P.Data.pos.x
+    $y = [double]$Point.y - [double]$P.Data.pos.y
+    return @{ x = $x; y = $y }
+}
+
+function Test-PadContentPoint {
+    param($P, $Local)
+    if ($null -eq $Local) { return $false }
+    $cw = $script:Grid.CellW
+    $ch = $script:Grid.CellH
+    if ($Local.x -lt 0) { return $false }
+    if ($Local.x -gt ([double]$P.Cols * $cw)) { return $false }
+    if ($Local.y -lt [double]$script:TitleHeight) { return $false }
+    if ($Local.y -gt ([double]$script:TitleHeight + [double]$P.Rows * $ch)) { return $false }
+    return $true
+}
+
+function Find-PadInsertIndex {
+    param($P, [double]$LocalX, [double]$LocalY)
+    $cw = $script:Grid.CellW
+    $ch = $script:Grid.CellH
+    $names = @($P.Items | ForEach-Object { [string]$_.Name })
+    if ($names.Count -eq 0) { return 0 }
+    $plan = $P.Plan
+    if ($null -eq $plan) { return $names.Count }
+    $bestName = $null
+    $bestD = [double]::MaxValue
+    $bx = 0.0; $by = 0.0; $bw = 0.0; $bh = 0.0
+    foreach ($nm in $names) {
+        if (-not $plan.Positions.ContainsKey($nm)) { continue }
+        $pp = $plan.Positions[$nm]
+        $x0 = [double]$pp.Col * $cw
+        $y0 = [double]$script:TitleHeight + [double]$pp.Row * $ch
+        $w = [double]$pp.Span * $cw
+        $h = [double]$pp.Span * $ch
+        $dx = 0.0; $dy = 0.0
+        if ($LocalX -lt $x0) { $dx = $x0 - $LocalX } elseif ($LocalX -gt ($x0 + $w)) { $dx = $LocalX - ($x0 + $w) }
+        if ($LocalY -lt $y0) { $dy = $y0 - $LocalY } elseif ($LocalY -gt ($y0 + $h)) { $dy = $LocalY - ($y0 + $h) }
+        $d = $dx * $dx + $dy * $dy
+        if ($d -lt $bestD) {
+            $bestD = $d; $bestName = $nm
+            $bx = $x0; $by = $y0; $bw = $w; $bh = $h
+        }
+    }
+    if ($null -eq $bestName) { return $names.Count }
+    $idx = [array]::IndexOf($names, $bestName)
+    if ($idx -lt 0) { return $names.Count }
+    $cx = $bx + $bw / 2.0
+    $cy = $by + $bh / 2.0
+    $after = $false
+    if ($LocalY -gt ($cy + 2)) { $after = $true }
+    elseif ([Math]::Abs($LocalY - $cy) -le 2 -and $LocalX -gt $cx) { $after = $true }
+    if ($after) { $idx++ }
+    return $idx
+}
+
+function Get-PadReorderedNames {
+    param($P, [string[]]$Names, [int]$Index)
+    $order = @($P.Items | ForEach-Object { [string]$_.Name })
+    $moving = @()
+    foreach ($n in @($Names)) { if ($n) { $moving += [string]$n } }
+    if ($moving.Count -eq 0) { return $order }
+    $rest = @()
+    $before = 0
+    for ($i = 0; $i -lt $order.Count; $i++) {
+        $nm = $order[$i]
+        if ($moving -contains $nm) {
+            if ($i -lt $Index) { $before++ }
+        } else {
+            $rest += $nm
+        }
+    }
+    $at = $Index - $before
+    if ($at -lt 0) { $at = 0 }
+    if ($at -gt $rest.Count) { $at = $rest.Count }
+    $out = @()
+    if ($at -gt 0) { $out += @($rest[0..($at - 1)]) }
+    $out += $moving
+    if ($at -lt $rest.Count) { $out += @($rest[$at..($rest.Count - 1)]) }
+    return @($out)
+}
+
+function Move-PadItemsToIndex {
+    param($P, [string[]]$Names, [int]$Index)
+    if ($null -eq $P) { return }
+    $newOrder = @(Get-PadReorderedNames -P $P -Names $Names -Index $Index)
+    $cur = @($P.Items | ForEach-Object { [string]$_.Name })
+    if (($newOrder -join '|') -eq ($cur -join '|')) { return }
+    $P.Data.order = @($newOrder)
+    Save-State
+    Refresh-Pad -PadId $P.Id
+    Write-Log ("顺序调整: " + ($newOrder -join ' > '))
+}
+
+function Show-PadDropPreview {
+    param($P, [int]$Index)
+    if ($null -eq $P -or $null -eq $P.Canvas) { return }
+    Hide-PadDropPreview -P $P
+    $moving = @()
+    foreach ($k in @($P.Selected.Keys)) { $moving += [string]$k }
+    if ($moving.Count -eq 0) { return }
+    $preview = @(Get-PadReorderedNames -P $P -Names $moving -Index $Index)
+    $plan = Get-PadPlan -Order $preview -Big @($P.Data.big) -Cols ([Math]::Max(1, [int]$P.Cols))
+    $first = [string]$moving[0]
+    if (-not $plan.Positions.ContainsKey($first)) { return }
+    $pp = $plan.Positions[$first]
+    $cw = $script:Grid.CellW
+    $ch = $script:Grid.CellH
+    $mk = New-Object System.Windows.Controls.Border
+    $mk.Name = 'fpDropPreview'
+    $mk.Width = [double]$pp.Span * $cw
+    $mk.Height = [double]$pp.Span * $ch
+    $mk.Background = New-FPBrush '#7FB6FF' 0.26
+    $mk.BorderBrush = New-FPBrush '#9CC8FF' 0.9
+    $mk.BorderThickness = '2'
+    $mk.CornerRadius = '5'
+    $mk.IsHitTestVisible = $false
+    [System.Windows.Controls.Canvas]::SetLeft($mk, [double]$pp.Col * $cw)
+    [System.Windows.Controls.Canvas]::SetTop($mk, [double]$pp.Row * $ch)
+    [void]$P.Canvas.Children.Add($mk)
+}
+
+function Hide-PadDropPreview {
+    param($P)
+    if ($null -eq $P -or $null -eq $P.Canvas) { return }
+    $rm = @()
+    foreach ($c in @($P.Canvas.Children)) {
+        if ($c -is [System.Windows.Controls.Border] -and [string]$c.Name -eq 'fpDropPreview') { $rm += $c }
+    }
+    foreach ($c in $rm) { [void]$P.Canvas.Children.Remove($c) }
+}
+
+function Update-PadSelectionVisual {
+    param([string]$PadId)
+    $p = $script:Pads[$PadId]
+    if ($null -eq $p -or $null -eq $p.Canvas) { return }
+    $sel = $p.Selected
+    if ($null -eq $sel) { $sel = @{} }
+    foreach ($c in @($p.Canvas.Children)) {
+        if (-not ($c -is [System.Windows.Controls.Border])) { continue }
+        $nm = [string]$c.DataContext
+        if (-not $nm) { continue }
+        if ($sel.ContainsKey($nm)) {
+            try {
+                $c.BorderBrush = New-FPBrush '#7FB6FF' 0.9
+                $c.Background = New-FPBrush '#7FB6FF' 0.20
+            } catch { }
+        } else {
+            try {
+                $c.BorderBrush = New-FPBrush '#000000' 0.0
+                $c.Background = New-FPBrush '#FFFFFF' 0.035
+            } catch { }
+        }
+    }
+}
+
 function Clear-PadSelection {
     param([string]$PadId)
     $p = $script:Pads[$PadId]
-    if ($null -eq $p -or $null -eq $p.Selected) { return }
-    try {
-        $p.Selected.BorderBrush = New-FPBrush '#000000' 0.0
-        $p.Selected.Background = New-FPBrush '#FFFFFF' 0.035
-    } catch { }
-    $p.Selected = $null
+    if ($null -eq $p) { return }
+    if ($null -eq $p.Selected -or $p.Selected.Count -eq 0) { return }
+    $p.Selected = @{}
+    $p.Anchor = ''
+    Update-PadSelectionVisual -PadId $PadId
 }
 
 function Clear-AllPadSelection {
@@ -2586,13 +2945,51 @@ function Select-PadCell {
     param([string]$PadId, $Cell)
     $p = $script:Pads[$PadId]
     if ($null -eq $p) { return }
-    # 桌面的习惯：任何时刻只选中一个（跨框也只选一个），选新的先清旧的
     Clear-AllPadSelection
-    $p.Selected = $Cell
-    try {
-        $Cell.BorderBrush = New-FPBrush '#7FB6FF' 0.9
-        $Cell.Background = New-FPBrush '#7FB6FF' 0.20
-    } catch { }
+    $nm = [string]$Cell.DataContext
+    $sel = @{}
+    if ($nm) { $sel[$nm] = $true }
+    $p.Selected = $sel
+    $p.Anchor = $nm
+    Update-PadSelectionVisual -PadId $PadId
+}
+
+function Toggle-PadCellSelection {
+    param([string]$PadId, [string]$Name)
+    $p = $script:Pads[$PadId]
+    if ($null -eq $p -or -not $Name) { return }
+    foreach ($k in @($script:Pads.Keys)) {
+        if ($k -eq $PadId) { continue }
+        try { Clear-PadSelection -PadId $k } catch { }
+    }
+    if ($null -eq $p.Selected) { $p.Selected = @{} }
+    if ($p.Selected.ContainsKey($Name)) { [void]$p.Selected.Remove($Name) } else { $p.Selected[$Name] = $true }
+    $p.Anchor = $Name
+    Update-PadSelectionVisual -PadId $PadId
+}
+
+function Select-PadRange {
+    param([string]$PadId, [string]$Name)
+    $p = $script:Pads[$PadId]
+    if ($null -eq $p -or -not $Name) { return }
+    $names = @($p.Items | ForEach-Object { [string]$_.Name })
+    $a = [array]::IndexOf($names, [string]$p.Anchor)
+    $b = [array]::IndexOf($names, $Name)
+    $keepAnchor = [string]$p.Anchor
+    if ($a -lt 0 -or $b -lt 0) {
+        Clear-AllPadSelection
+        $p.Selected = @{ $Name = $true }
+        $p.Anchor = $Name
+        Update-PadSelectionVisual -PadId $PadId
+        return
+    }
+    if ($a -gt $b) { $t = $a; $a = $b; $b = $t }
+    $sel = @{}
+    for ($i = $a; $i -le $b; $i++) { $sel[$names[$i]] = $true }
+    Clear-AllPadSelection
+    $p.Selected = $sel
+    $p.Anchor = $keepAnchor
+    Update-PadSelectionVisual -PadId $PadId
 }
 
 function Open-PadItem {
@@ -2607,29 +3004,39 @@ function Open-PadItem {
 }
 
 function Start-PadDragOut {
-    param([string]$PadId, [string]$FullPath)
+    param([string]$PadId, [string[]]$Names = @(), [string]$FullPath = '')
     $p = $script:Pads[$PadId]
     if ($null -eq $p) { return }
-    if (-not (Test-Path -LiteralPath $FullPath)) { return }
+    $dropPaths = @()
+    if ($FullPath) { $dropPaths += $FullPath }
+    foreach ($n in @($Names)) {
+        if (-not $n) { continue }
+        $fp = Join-Path ([string]$p.Data.path) ([string]$n)
+        if (Test-Path -LiteralPath $fp) { $dropPaths += $fp }
+    }
+    $dropPaths = @($dropPaths | Select-Object -Unique)
+    if (@($dropPaths).Count -eq 0) { return }
+    $FullPath = [string]$dropPaths[0]
     try {
         $data = New-Object System.Windows.DataObject
-        $data.SetData([System.Windows.DataFormats]::FileDrop, [string[]]@($FullPath))
+        $data.SetData([System.Windows.DataFormats]::FileDrop, [string[]]$dropPaths)
         $effect = [System.Windows.DragDrop]::DoDragDrop($p.Window, $data,
             ([System.Windows.DragDropEffects]::Move -bor [System.Windows.DragDropEffects]::Copy))
-        Write-Log "拖出: $FullPath effect=$effect"
+        Write-Log ("拖出 {0} 项 effect={1}" -f @($dropPaths).Count, $effect)
         if ($effect -ne [System.Windows.DragDropEffects]::None -and $effect -ne 0) {
-            if (Test-Path -LiteralPath $FullPath) {
-                # 目标只拷贝没有移动时，源文件还在：按「拖出去=移回桌面」的语义补删源
-                $desk = [Environment]::GetFolderPath('Desktop')
-                $leaf = Split-Path -Leaf $FullPath
+            # 目标只拷贝没有移动时，源文件还在：按「拖出去=移回桌面」的语义补删源
+            $desk = [Environment]::GetFolderPath('Desktop')
+            foreach ($src in @($dropPaths)) {
+                if (-not (Test-Path -LiteralPath $src)) { continue }
+                $leaf = Split-Path -Leaf $src
                 $cand = Join-Path $desk $leaf
                 if (Test-Path -LiteralPath $cand) {
                     $sLen = 0; $dLen = -1
-                    try { $sLen = (Get-Item -LiteralPath $FullPath -Force).Length } catch { }
+                    try { $sLen = (Get-Item -LiteralPath $src -Force).Length } catch { }
                     try { $dLen = (Get-Item -LiteralPath $cand -Force).Length } catch { }
                     if ($sLen -eq $dLen) {
-                        Remove-Item -LiteralPath $FullPath -Recurse -Force
-                        Write-Log "拖出完成（补删源）: $FullPath -> $cand"
+                        Remove-Item -LiteralPath $src -Recurse -Force
+                        Write-Log "拖出完成（补删源）: $src -> $cand"
                     }
                 }
             }
@@ -3177,6 +3584,7 @@ function Show-PadMenu {
     $aColsAuto = { param($a, $b) $d = Get-PadById $a; if ($d) { $d.cols = 'auto'; Save-State; Refresh-Pad -PadId $a } }
     $aCols1 = { param($a, $b) $d = Get-PadById $a; if ($d) { $d.cols = '1'; Save-State; Refresh-Pad -PadId $a } }
     $aCols2 = { param($a, $b) $d = Get-PadById $a; if ($d) { $d.cols = '2'; Save-State; Refresh-Pad -PadId $a } }
+    $aLayout = { param($a, $b) Show-LayoutDialog -PadId $a }
     $aPin = {
         param($a, $b)
         $d = Get-PadById $a
@@ -3228,7 +3636,7 @@ function Show-PadMenu {
     if ($data.autoUrgency -eq $false) {
         [void]$entries.Add((New-MenuEntry -PadId $id -Text '底色随剩余天数自动变色' -Action $aAuto))
     } else {
-        [void]$entries.Add((New-MenuEntry -PadId $id -Text '底色随剩余天数自动变色' -Action $aAuto -Checkable -Checked $true))
+        [void]$entries.Add((New-MenuEntry -PadId $id -Text '底色随剩余天数自动变色' -Action $aAuto -Checkable -Checked:$true))
     }
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '紧急度档位配色…' -Action $aPalette))
     [void]$entries.Add((New-MenuSep))
@@ -3236,12 +3644,13 @@ function Show-PadMenu {
     if ($data.categoryColorOn -ne $false -and $data.categoryColor) { $catHint = [string]$data.categoryColor }
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '类别色…（标题条）' -Action $aCategory -Hint $catHint))
     [void]$entries.Add((New-MenuSep))
-    [void]$entries.Add((New-MenuHeader -Text '大小'))
-    [void]$entries.Add((New-MenuEntry -PadId $id -Text '自动（跟着文件数长大）' -Action $aColsAuto -Checkable -Checked ($data.cols -eq 'auto')))
-    [void]$entries.Add((New-MenuEntry -PadId $id -Text '强制 1 列' -Action $aCols1 -Checkable -Checked ($data.cols -eq '1')))
-    [void]$entries.Add((New-MenuEntry -PadId $id -Text '强制 2 列' -Action $aCols2 -Checkable -Checked ($data.cols -eq '2')))
+    $sizeHint = '自动'
+    if ([string]$data.cols -match '^\d+$') { $sizeHint = $data.cols + ' 列' }
+    if ([string]$data.rows -match '^\d+$') { $sizeHint = $(if ($sizeHint -eq '自动') { $data.rows + ' 行' } else { $sizeHint + ' × ' + $data.rows + ' 行' }) }
+    [void]$entries.Add((New-MenuEntry -PadId $id -Text '布局与排序…' -Action $aLayout -Hint $sizeHint))
     [void]$entries.Add((New-MenuSep))
-    [void]$entries.Add((New-MenuEntry -PadId $id -Text '置顶' -Action $aPin -Checkable -Checked ([bool]$data.pinned)))
+    $pinnedNow = [bool]$data.pinned
+    [void]$entries.Add((New-MenuEntry -PadId $id -Text '置顶' -Action $aPin -Checkable -Checked:$pinnedNow))
     [void]$entries.Add((New-MenuSep))
     $dueTip = [string]$data.dueDate
     if (-not $dueTip) { $dueTip = (Get-Date).ToString('yyyy-MM-dd') }
@@ -3260,6 +3669,169 @@ if ($maxChars -gt 3 -and $zipName.Length -gt $maxChars) { $zipName = $zipName.Su
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '退出 FolderPad' -Action $aExit))
 
     Show-FpMenu -PadId $id -Entries $entries.ToArray()
+}
+
+function Set-PadItemsBig {
+    param([string]$PadId, [string[]]$Names, [bool]$Big)
+    $p = $script:Pads[$PadId]
+    if ($null -eq $p) { return }
+    $cur = @($p.Data.big)
+    foreach ($n in @($Names)) {
+        $nm = [string]$n
+        if (-not $nm) { continue }
+        $cur = @($cur | Where-Object { [string]$_ -ne $nm })
+        if ($Big) { $cur += $nm }
+    }
+    $p.Data.big = @($cur | Select-Object -Unique)
+    Save-State
+    Refresh-Pad -PadId $PadId
+    Write-Log ("放大突出: " + $(if ($Big) { '设为 2×2' } else { '取消' }) + ' ' + (@($Names) -join ', '))
+}
+
+function Set-PadSort {
+    param([string]$PadId, [string]$Key)
+    $p = $script:Pads[$PadId]
+    if ($null -eq $p) { return }
+    $items = @($p.Items)
+    $dirExpr = @{ Expression = { if ($_.IsDir) { 0 } else { 1 } } }
+    $sorted = @()
+    switch ($Key) {
+        'mtime' { $sorted = @($items | Sort-Object $dirExpr, @{ Expression = { $_.Modified }; Descending = $false }) }
+        'size' { $sorted = @($items | Sort-Object $dirExpr, @{ Expression = { $_.Size }; Descending = $true }) }
+        'type' { $sorted = @($items | Sort-Object $dirExpr, @{ Expression = { [System.IO.Path]::GetExtension([string]$_.Name).ToLower() } }, @{ Expression = { [string]$_.Name } }) }
+        default { $sorted = @($items | Sort-Object $dirExpr, @{ Expression = { [string]$_.Name } }) }
+    }
+    $p.Data.order = @($sorted | ForEach-Object { [string]$_.Name })
+    Save-State
+    Refresh-Pad -PadId $PadId
+    Write-Log ("按 {0} 排序: {1} 项" -f $Key, @($sorted).Count)
+}
+
+function Show-LayoutDialog {
+    param([string]$PadId)
+    $p = $script:Pads[$PadId]
+    if ($null -eq $p) { return }
+    $data = $p.Data
+    $script:FPLayoutSortRbs = @{}
+
+    $res = Show-CustomDialog -Title '布局与排序' -Message '' -Kind 'info' -Width 470 `
+        -Buttons @(
+        @{ Text = '取消'; Value = 'cancel' },
+        @{ Text = '应用'; Value = 'ok'; Primary = $true }
+    ) -BuildContent {
+        param($panel)
+        $mkLbl = {
+            param($text)
+            $t = New-Object System.Windows.Controls.TextBlock
+            $t.Text = $text
+            $t.Width = 96
+            $t.FontSize = 12.5
+            $t.Foreground = New-FPBrush '#FFFFFF' 0.78
+            $t.VerticalAlignment = 'Center'
+            return $t
+        }
+        # 列数
+        $rowC = New-Object System.Windows.Controls.StackPanel
+        $rowC.Orientation = 'Horizontal'
+        $rowC.Margin = '0,0,0,10'
+        [void]$rowC.Children.Add((& $mkLbl '列数'))
+        $tbC = New-Object System.Windows.Controls.TextBox
+        $tbC.Text = $(if ([string]$data.cols -match '^\d+$') { [string]$data.cols } else { '0' })
+        $tbC.Width = 56
+        $tbC.FontSize = 12.5
+        $tbC.Background = New-FPBrush '#FFFFFF' 0.94
+        $tbC.Foreground = New-FPBrush '#111111' 1
+        [void]$rowC.Children.Add($tbC)
+        $hintC = New-Object System.Windows.Controls.TextBlock
+        $hintC.Text = '  1–8；0 = 自动（跟着项目数走）'
+        $hintC.FontSize = 11.5
+        $hintC.Foreground = New-FPBrush '#FFFFFF' 0.45
+        $hintC.VerticalAlignment = 'Center'
+        [void]$rowC.Children.Add($hintC)
+        [void]$panel.Children.Add($rowC)
+        $script:FPLayoutCols = $tbC
+
+        # 行数
+        $rowR = New-Object System.Windows.Controls.StackPanel
+        $rowR.Orientation = 'Horizontal'
+        $rowR.Margin = '0,0,0,10'
+        [void]$rowR.Children.Add((& $mkLbl '行数'))
+        $tbR = New-Object System.Windows.Controls.TextBox
+        $tbR.Text = $(if ([string]$data.rows -match '^\d+$') { [string]$data.rows } else { '0' })
+        $tbR.Width = 56
+        $tbR.FontSize = 12.5
+        $tbR.Background = New-FPBrush '#FFFFFF' 0.94
+        $tbR.Foreground = New-FPBrush '#111111' 1
+        [void]$rowR.Children.Add($tbR)
+        $hintR = New-Object System.Windows.Controls.TextBlock
+        $hintR.Text = '  1–8；0 = 自动（至少几行，放不下继续往下长）'
+        $hintR.FontSize = 11.5
+        $hintR.Foreground = New-FPBrush '#FFFFFF' 0.45
+        $hintR.VerticalAlignment = 'Center'
+        [void]$rowR.Children.Add($hintR)
+        [void]$panel.Children.Add($rowR)
+        $script:FPLayoutRows = $tbR
+
+        # 排序
+        $rowS = New-Object System.Windows.Controls.StackPanel
+        $rowS.Orientation = 'Horizontal'
+        $rowS.Margin = '0,0,0,6'
+        [void]$rowS.Children.Add((& $mkLbl '排序'))
+        $rbKeep = New-Object System.Windows.Controls.RadioButton
+        $rbKeep.Content = '保持手动'
+        $rbKeep.IsChecked = $true
+        $rbKeep.GroupName = 'fpsort'
+        $rbKeep.Foreground = New-FPBrush '#FFFFFF' 0.85
+        $rbKeep.FontSize = 12
+        $rbKeep.Margin = '0,0,12,0'
+        $rbKeep.VerticalAlignment = 'Center'
+        [void]$rowS.Children.Add($rbKeep)
+        $script:FPLayoutSortRbs['keep'] = $rbKeep
+        foreach ($it in @(
+                @{ Key = 'name'; Text = '名称' },
+                @{ Key = 'mtime'; Text = '修改时间' },
+                @{ Key = 'size'; Text = '大小' },
+                @{ Key = 'type'; Text = '类型' })) {
+            $rb = New-Object System.Windows.Controls.RadioButton
+            $rb.Content = $it.Text
+            $rb.GroupName = 'fpsort'
+            $rb.Foreground = New-FPBrush '#FFFFFF' 0.85
+            $rb.FontSize = 12
+            $rb.Margin = '0,0,12,0'
+            $rb.VerticalAlignment = 'Center'
+            [void]$rowS.Children.Add($rb)
+            $script:FPLayoutSortRbs[$it.Key] = $rb
+        }
+        [void]$panel.Children.Add($rowS)
+
+        $tip = New-Object System.Windows.Controls.TextBlock
+        $tip.Text = '排序会重排一次顺序；「保持手动」则不动顺序，可随时在框里拖动图标调整。'
+        $tip.FontSize = 11
+        $tip.Foreground = New-FPBrush '#FFFFFF' 0.35
+        $tip.TextWrapping = 'Wrap'
+        $tip.Margin = '0,2,0,0'
+        [void]$panel.Children.Add($tip)
+    }
+
+    if ($null -eq $res -or $res.Value -ne 'ok') { return }
+    try {
+        $c = 0
+        if ($script:FPLayoutCols) { [void][int]::TryParse($script:FPLayoutCols.Text.Trim(), [ref]$c) }
+        if ($c -ge 1 -and $c -le 8) { $data.cols = [string]$c } else { $data.cols = 'auto' }
+        $r = 0
+        if ($script:FPLayoutRows) { [void][int]::TryParse($script:FPLayoutRows.Text.Trim(), [ref]$r) }
+        if ($r -ge 1 -and $r -le 8) { $data.rows = [string]$r } else { $data.rows = 'auto' }
+        $sortKey = ''
+        foreach ($k in @($script:FPLayoutSortRbs.Keys)) {
+            $rb = $script:FPLayoutSortRbs[$k]
+            if ($rb -and $rb.IsChecked) { $sortKey = [string]$k; break }
+        }
+        Save-State
+        if ($sortKey -and $sortKey -ne 'keep') { Set-PadSort -PadId $PadId -Key $sortKey }
+        Refresh-Pad -PadId $PadId
+    } catch {
+        Show-MessageDialog -Title '应用布局失败' -Message $_.Exception.Message -Kind 'error'
+    }
 }
 
 function Show-ItemMenu {
@@ -3290,6 +3862,26 @@ function Show-ItemMenu {
         }
     }
 
+    $aBigToggle = {
+        param($a, $b)
+        $pp = $script:Pads[$a]
+        if ($null -eq $pp) { return }
+        $names = @($pp.Selected.Keys)
+        if (@($names).Count -eq 0 -and $b) { $names = @([string]$b.Name) }
+        $anyBig = $false
+        foreach ($n in $names) { if (@($pp.Data.big) -contains [string]$n) { $anyBig = $true } }
+        Set-PadItemsBig -PadId $a -Names $names -Big (-not $anyBig)
+    }
+
+    # 多选时按"选中的那些"，否则就只有当前这一项
+    $selNames = @($p.Selected.Keys)
+    if (@($selNames).Count -eq 0) { $selNames = @([string]$Item.Name) }
+    $bigCount = 0
+    foreach ($n in $selNames) { if (@($p.Data.big) -contains [string]$n) { $bigCount++ } }
+    $bigLabel = '放大突出（占 2×2）'
+    if ($bigCount -ge @($selNames).Count) { $bigLabel = '取消放大（恢复 1×1）' }
+    if (@($selNames).Count -gt 1) { $bigLabel = $bigLabel + ('（选中 ' + @($selNames).Count + ' 项）') }
+
     $entries = New-Object System.Collections.ArrayList
     [void]$entries.Add((New-MenuHeader -Text ([string]$Item.Name)))
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '打开' -Action $aOpen -Item $Item))
@@ -3297,6 +3889,8 @@ function Show-ItemMenu {
     [void]$entries.Add((New-MenuSep))
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '复制路径' -Action $aCopy -Item $Item))
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '重命名…' -Action $aRename -Item $Item))
+    $isBigNow = ($bigCount -gt 0)
+    [void]$entries.Add((New-MenuEntry -PadId $id -Text $bigLabel -Action $aBigToggle -Item $Item -Checkable -Checked:$isBigNow))
     [void]$entries.Add((New-MenuSep))
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '移到桌面' -Action $aDesktop -Item $Item))
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '移到…（选目录）' -Action $aToDir -Item $Item))
@@ -4296,6 +4890,63 @@ function Invoke-SelfTest {
     # 12. 数据文件
     $okFiles = (Test-Path -LiteralPath $script:Path_Json) -and (Test-Path -LiteralPath $script:Path_HiddenBackup)
     Test-Assert '数据文件齐全' $okFiles ("pads.json / hidden-backup.txt")
+
+    # 13. 占位打包（2×2 放大 + first-fit）
+    try {
+        $n9 = @(1..9 | ForEach-Object { "f$_" })
+        $pl = Get-PadPlan -Order $n9 -Big @() -Cols 3
+        $okA = ($pl.Rows -eq 3 -and $pl.Cols -eq 3 -and $pl.Positions.Count -eq 9)
+        foreach ($k in @($pl.Positions.Keys)) { if ([int]$pl.Positions[$k].Span -ne 1) { $okA = $false } }
+        Test-Assert '打包：9 项 3 列 = 3×3' $okA ("rows={0} cols={1}" -f $pl.Rows, $pl.Cols)
+
+        $n6 = @('big1', 'a', 'b', 'c', 'd', 'e')
+        $pl2 = Get-PadPlan -Order $n6 -Big @('big1') -Cols 3
+        $okB = ($pl2.Rows -eq 3 -and [int]$pl2.Positions['big1'].Span -eq 2 -and [int]$pl2.Positions['big1'].Col -eq 0 -and [int]$pl2.Positions['big1'].Row -eq 0)
+        Test-Assert '打包：1 大格 + 5 普通 = 3×3' $okB ("rows={0} 大格在 ({1},{2})" -f $pl2.Rows, $pl2.Positions['big1'].Col, $pl2.Positions['big1'].Row)
+
+        $n9b = @('big1') + @(1..8 | ForEach-Object { "g$_" })
+        $pl3 = Get-PadPlan -Order $n9b -Big @('big1') -Cols 3
+        Test-Assert '打包：1 大格 + 8 普通 = 4 行' ($pl3.Rows -eq 4) ("rows=" + $pl3.Rows)
+
+        $seen = @{}
+        $overlap = $false
+        foreach ($k in @($pl2.Positions.Keys)) {
+            $pp = $pl2.Positions[$k]
+            for ($dx = 0; $dx -lt [int]$pp.Span; $dx++) {
+                for ($dy = 0; $dy -lt [int]$pp.Span; $dy++) {
+                    $key = ('{0},{1}' -f ([int]$pp.Col + $dx), ([int]$pp.Row + $dy))
+                    if ($seen.ContainsKey($key)) { $overlap = $true }
+                    $seen[$key] = $true
+                }
+            }
+        }
+        Test-Assert '打包：无重叠' (-not $overlap) ''
+
+        $pl4 = Get-PadPlan -Order @('big1', 'a') -Big @('big1') -Cols 1
+        Test-Assert '打包：1 列有放大时强制 2 列' ([int]$pl4.Cols -eq 2 -and [bool]$pl4.ForcedCols) ("cols=" + $pl4.Cols)
+
+        $pl5 = Get-PadPlan -Order $n9 -Big @() -Cols 3
+        Test-Assert '打包：取消放大后回到 3 行' ($pl5.Rows -eq 3) ("rows=" + $pl5.Rows)
+    } catch { Test-Assert '占位打包' $false $_.Exception.Message }
+
+    # 14. 顺序归一化
+    try {
+        $fake = @{ order = @('b', '不存在', 'a'); big = @('a', '也不存在') }
+        $norm = Normalize-PadOrder -Pad $fake -Names @('a', 'b', 'c')
+        $okN = ((@($norm.Order) -join ',') -eq 'b,a,c') -and ((@($norm.Big) -join ',') -eq 'a')
+        Test-Assert '顺序归一化（丢弃失效项、补新项）' $okN ("order=" + (@($norm.Order) -join ',') + " big=" + (@($norm.Big) -join ','))
+    } catch { Test-Assert '顺序归一化' $false $_.Exception.Message }
+
+    # 15. 拖动插入排序
+    try {
+        $fakeP = @{ Items = @([pscustomobject]@{ Name = 'a' }, [pscustomobject]@{ Name = 'b' }, [pscustomobject]@{ Name = 'c' }, [pscustomobject]@{ Name = 'd' }) }
+        $r1 = (Get-PadReorderedNames -P $fakeP -Names @('d') -Index 0) -join ','
+        $r2 = (Get-PadReorderedNames -P $fakeP -Names @('a') -Index 4) -join ','
+        $r3 = (Get-PadReorderedNames -P $fakeP -Names @('a', 'b') -Index 4) -join ','
+        $r4 = (Get-PadReorderedNames -P $fakeP -Names @('c') -Index 1) -join ','
+        $okR = ($r1 -eq 'd,a,b,c') -and ($r2 -eq 'b,c,d,a') -and ($r3 -eq 'c,d,a,b') -and ($r4 -eq 'a,c,b,d')
+        Test-Assert '拖动插入排序（单项/整组/前插）' $okR ($r1 + ' / ' + $r2 + ' / ' + $r3 + ' / ' + $r4)
+    } catch { Test-Assert '拖动插入排序' $false $_.Exception.Message }
 
     try { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
 
