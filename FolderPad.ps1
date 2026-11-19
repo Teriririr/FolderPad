@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:AppName    = 'FolderPad'
-$script:AppVersion = '1.2.3'
+$script:AppVersion = '1.3.0'
 $script:AppDir     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:DataDir           = Join-Path $env:APPDATA 'FolderPad'
@@ -4517,6 +4517,29 @@ function Toggle-AllPads {
     if ($script:State.settings.hideAll) { Show-AllPads } else { Hide-AllPads }
 }
 
+function Restore-AllHiddenFoldersQuiet {
+    # 关机/注销/退出时用：按恢复清单把文件夹还原成可见，不弹任何窗口
+    $backup = Read-HiddenBackup
+    $restored = 0
+    foreach ($e in $backup) {
+        if (-not [System.IO.Directory]::Exists($e.Path)) { continue }
+        $mask = ([System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System)
+        try {
+            $cur = [System.IO.File]::GetAttributes($e.Path)
+            if (-not ($cur -band [System.IO.FileAttributes]::Hidden)) { continue }
+            $new = $cur -band (-bnot $mask)
+            if ($e.Attrs -ge 0) {
+                $new = ($cur -band (-bnot $mask)) -bor ([System.IO.FileAttributes]($e.Attrs) -band $mask)
+            }
+            [System.IO.File]::SetAttributes($e.Path, $new)
+            $restored++
+        } catch {
+            Write-Log "还原失败: $($e.Path) :: $($_.Exception.Message)" 'WARN'
+        }
+    }
+    return $restored
+}
+
 function Restore-AllHiddenFolders {
     $backup = Read-HiddenBackup
     $restored = 0
@@ -5144,6 +5167,63 @@ function Start-FolderPadApp {
     Initialize-GridMetrics
     $script:LastDate = (Get-Date).Date
     $script:LastRefresh = Get-Date
+
+    # 关机/注销时会话接收窗口：保证"关机前把文件夹还原成普通文件夹"
+    # 这样即使没开开机自启、或者启动失败，重启后文件仍在桌面上，不会是"不见了"
+    try {
+        $sink = New-Object System.Windows.Window
+        $sink.Width = 1
+        $sink.Height = 1
+        $sink.Left = -20000
+        $sink.Top = -20000
+        $sink.WindowStyle = 'None'
+        $sink.ShowInTaskbar = $false
+        $sink.ShowActivated = $false
+        $sink.AllowsTransparency = $true
+        $sink.Background = [System.Windows.Media.Brushes]::Transparent
+        $sink.Topmost = $false
+        $sink.Show()
+        $script:ShutdownSink = $sink
+        $hSink = ([System.Windows.Interop.WindowInteropHelper]::new($sink)).Handle
+        try { [FPNative]::ShowWindow($hSink, 0) | Out-Null } catch { }   # SW_HIDE：只留消息通道
+        $srcSink = [System.Windows.Interop.HwndSource]::FromHwnd($hSink)
+        if ($srcSink) {
+            $shutdownHook = {
+                param($hWnd, $msg, $wParam, $lParam, [ref]$handled)
+                # WM_QUERYENDSESSION = 0x0011，WM_ENDSESSION = 0x0016
+                if ($msg -eq 0x0011 -or ($msg -eq 0x0016 -and $wParam.ToInt64() -ne 0)) {
+                    $handled = $true
+                    try {
+                        $n = Restore-AllHiddenFoldersQuiet
+                        Save-State
+                        Set-CleanExitMarker
+                        Write-Log "收到关机/注销通知（msg=0x$('{0:X4}' -f $msg)）：已把 $n 个文件夹还原成可见，开机后可开程序恢复框"
+                    } catch {
+                        Write-Log "关机还原失败: $($_.Exception.Message)" 'ERROR'
+                    }
+                    return [IntPtr]1
+                }
+                # 关机被别的程序取消（WM_ENDSESSION 且 wParam=0）→ 把文件夹重新藏回去，免得桌面上同时有图标和框
+                if ($msg -eq 0x0016 -and $wParam.ToInt64() -eq 0) {
+                    $handled = $true
+                    try {
+                        $n2 = 0
+                        foreach ($pd in @($script:State.pads)) {
+                            if ($null -eq $pd) { continue }
+                            if ([System.IO.Directory]::Exists([string]$pd.path)) {
+                                if (Set-FolderHidden ([string]$pd.path)) { $n2++ }
+                            }
+                        }
+                        Write-Log "关机被取消：已把 $n2 个文件夹重新隐藏"
+                    } catch { }
+                    return [IntPtr]::Zero
+                }
+                return [IntPtr]::Zero
+            }
+            [void]$srcSink.AddHook($shutdownHook)
+            Write-Log "关机还原钩子已挂: $hSink"
+        }
+    } catch { Write-Log "关机还原钩子安装失败: $($_.Exception.Message)" 'WARN' }
 
     Invoke-StartupSelfCheck
     New-TrayIcon
