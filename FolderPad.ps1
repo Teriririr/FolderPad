@@ -3929,6 +3929,17 @@ function Show-PadMenu {
     $aCols1 = { param($a, $b) $d = Get-PadById $a; if ($d) { $d.cols = '1'; Save-State; Refresh-Pad -PadId $a } }
     $aCols2 = { param($a, $b) $d = Get-PadById $a; if ($d) { $d.cols = '2'; Save-State; Refresh-Pad -PadId $a } }
     $aLayout = { param($a, $b) Show-LayoutDialog -PadId $a }
+    $aTidy = {
+        param($a, $b)
+        $d = Get-PadById $a
+        if (-not $d) { return }
+        # 清掉手动坐标 → 下次布局会按顺序重新紧密排布（无空洞）
+        $d.cells = @{}
+        Save-State
+        Refresh-Pad -PadId $a
+        Write-Log '已整理：清除手动坐标，按顺序重新紧密排列'
+        Show-TrayBalloon -Title 'FolderPad' -Text '已整理，图标挤到最紧凑'
+    }
     $aPin = {
         param($a, $b)
         $d = Get-PadById $a
@@ -3992,6 +4003,26 @@ function Show-PadMenu {
     if ([string]$data.cols -match '^\d+$') { $sizeHint = $data.cols + ' 列' }
     if ([string]$data.rows -match '^\d+$') { $sizeHint = $(if ($sizeHint -eq '自动') { $data.rows + ' 行' } else { $sizeHint + ' × ' + $data.rows + ' 行' }) }
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '布局与排序…' -Action $aLayout -Hint $sizeHint))
+    # 统计空格：格子总数 - 被占格子数（放大块按 4 格算）
+    $gapCount = 0
+    try {
+        $rp = $script:Pads[$PadId]
+        if ($rp -and $rp.Plan -and $rp.Cols -gt 0 -and $rp.Rows -gt 0) {
+            $usedCells = 0
+            foreach ($it in @($rp.Items)) {
+                $nm2 = [string]$it.Name
+                if ($rp.Plan.Positions.ContainsKey($nm2)) {
+                    $sp2 = [int]$rp.Plan.Positions[$nm2].Span
+                    $usedCells += $sp2 * $sp2
+                }
+            }
+            $gapCount = ([int]$rp.Cols * [int]$rp.Rows) - $usedCells
+            if ($gapCount -lt 0) { $gapCount = 0 }
+        }
+    } catch { }
+    if ($gapCount -gt 0) {
+        [void]$entries.Add((New-MenuEntry -PadId $id -Text '整理（挤掉空格）' -Action $aTidy -Hint ("空 $gapCount 格")))
+    }
     [void]$entries.Add((New-MenuSep))
     $pinnedNow = [bool]$data.pinned
     [void]$entries.Add((New-MenuEntry -PadId $id -Text '置顶' -Action $aPin -Checkable -Checked:$pinnedNow))
