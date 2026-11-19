@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:AppName    = 'FolderPad'
-$script:AppVersion = '1.3.0'
+$script:AppVersion = '1.3.1'
 $script:AppDir     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 
 $script:DataDir           = Join-Path $env:APPDATA 'FolderPad'
@@ -87,6 +87,9 @@ $script:BigItemSpan        = 2       # 放大突出的大格占几格（固定 2
 $script:BigIconScale       = 2       # 大格图标 = 普通图标 × 这个倍数
 $script:ReorderByDrag      = $false  # 框内拖动排序（默认关：改用手感更好的方向键）
 $script:HideJunkFiles      = $true   # 不显示 ~$xxx.docx（Office/WPS 临时锁文件）、Thumbs.db、desktop.ini
+$script:HideWithSystem     = $true   # 隐藏文件夹时同时加 System：Explorer 开了「显示隐藏项」也不会露出半透明的"虚"图标
+$script:MinTitleWidth      = 78      # 标题条里名字至少留这么宽（再窄就只剩省略号）
+$script:TitleReserveWidth  = 96      # 名字右边「还剩 + 数字槽 + 天」预留宽度
 
 $script:State      = $null
 $script:Pads       = @{}      # id -> 运行时对象（窗口、控件、条目）
@@ -205,6 +208,8 @@ public static class FPNative
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [StructLayout(LayoutKind.Sequential)]
     public struct FPRECT { public int L; public int T; public int R; public int B; }
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern void SHChangeNotify(int eventId, uint flags, string item1, IntPtr item2);
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out FPRECT r);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -1030,16 +1035,30 @@ function Set-FolderHidden {
     param([string]$Path)
     try {
         $cur = [System.IO.File]::GetAttributes($Path)
-        $hidden = [System.IO.FileAttributes]::Hidden
-        if (-not ($cur -band $hidden)) {
-            [System.IO.File]::SetAttributes($Path, ($cur -bor $hidden))
+        $mask = [System.IO.FileAttributes]::Hidden
+        # 只加 Hidden 时，如果用户开了「显示隐藏的项目」，桌面上会露出半透明的"虚"图标；
+        # 加上 System 后，Explorer 默认（隐藏受保护的系统文件）就不会显示了
+        if ($script:HideWithSystem) { $mask = $mask -bor [System.IO.FileAttributes]::System }
+        if (($cur -band $mask) -ne $mask) {
+            [System.IO.File]::SetAttributes($Path, ($cur -bor $mask))
             Write-Log "已设为隐藏: $Path"
         }
+        Notify-ShellPath $Path
         return $true
     } catch {
         Write-Log "设置隐藏失败: $Path :: $($_.Exception.Message)" 'ERROR'
         return $false
     }
+}
+
+function Notify-ShellPath {
+    # 通知资源管理器某路径属性变化，让它立刻刷新图标（否则会残留一个图标或虚影）
+    param([string]$Path)
+    try {
+        if (-not $Path) { return }
+        # SHCNE_UPDATEITEM = 0x00002000, SHCNF_PATHW = 0x0005
+        [FPNative]::SHChangeNotify(0x00002000, 0x0005, $Path, [IntPtr]::Zero)
+    } catch { }
 }
 
 function Restore-FolderVisibility {
@@ -1060,6 +1079,7 @@ function Restore-FolderVisibility {
             else { $new = $cur -band (-bnot $mask) }
         }
         if ($new -ne $cur) { [System.IO.File]::SetAttributes($Pad.path, $new) }
+        Notify-ShellPath $Pad.path
         Write-Log ("已还原属性: {0} => {1}" -f $Pad.path, [System.IO.FileAttributes]$new)
         return $true
     } catch {
@@ -2728,6 +2748,35 @@ function Get-PadPlan {
     if ($rows -lt 1) { $rows = 1 }
     return @{ Positions = $pos; Cells = $outCells; Cols = $cols; Rows = $rows; ForcedCols = $forced }
 }
+function Get-TextWidthEstimate {
+    param([string]$Text, [double]$FontSize)
+    if (-not $Text) { return 0.0 }
+    $w = 0.0
+    foreach ($ch in $Text.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -ge 0x2E80) { $w += $FontSize * 1.0 }          # CJK 全角
+        elseif ($code -ge 0x41 -and $code -le 0x5A) { $w += $FontSize * 0.70 }  # 大写字母
+        else { $w += $FontSize * 0.54 }
+    }
+    return $w
+}
+
+function Get-PadTitleMinWidth {
+    # 框的最小宽度：保证标题条里的「名字 + 还剩 [N] 天」都放得下
+    param($Pad)
+    $name = ''
+    $hasDue = $false
+    if ($Pad -and $Pad.Data) {
+        $name = [string]$Pad.Data.name
+        if ($Pad.Data.dueDate) { $hasDue = $true }
+    }
+    $nameW = Get-TextWidthEstimate -Text $name -FontSize ([double]$script:TitleFont)
+    $nameW = [Math]::Max([double]$script:MinTitleWidth, [Math]::Min($nameW, 240.0))
+    $reserve = 24.0
+    if ($hasDue) { $reserve = [double]$script:TitleReserveWidth }
+    return [double](11 + $nameW + $reserve + 2 * [double]$script:BorderWidth)
+}
+
 function Update-PadLayout {
     param([string]$PadId)
     $p = $script:Pads[$PadId]
@@ -2771,6 +2820,9 @@ function Update-PadLayout {
         $p.ForcedCols = [bool]$plan.ForcedCols
 
         $w = $p.Cols * $cw + 2 * $script:BorderWidth
+        # 太空/只有 1-2 个文件时框会很窄，标题条的「名字 + 倒计时」会被切掉 —— 给个按标题算的最小宽度
+        $titleNeed = Get-PadTitleMinWidth -Pad $p
+        if ($w -lt $titleNeed) { $w = $titleNeed }
         $h = $script:TitleHeight + $p.Rows * $ch + 2 * $script:BorderWidth
         $p.Width = $w
         Set-PadBounds -P $p -X $p.Data.pos.x -Y $p.Data.pos.y -W $w -H $h
@@ -4532,6 +4584,7 @@ function Restore-AllHiddenFoldersQuiet {
                 $new = ($cur -band (-bnot $mask)) -bor ([System.IO.FileAttributes]($e.Attrs) -band $mask)
             }
             [System.IO.File]::SetAttributes($e.Path, $new)
+            Notify-ShellPath $e.Path
             $restored++
         } catch {
             Write-Log "还原失败: $($e.Path) :: $($_.Exception.Message)" 'WARN'
@@ -4555,6 +4608,7 @@ function Restore-AllHiddenFolders {
                 $new = ($cur -band (-bnot $mask)) -bor ([System.IO.FileAttributes]($e.Attrs) -band $mask)
             }
             [System.IO.File]::SetAttributes($e.Path, $new)
+            Notify-ShellPath $e.Path
             $restored++
         } catch { $failed += $e.Path }
     }
@@ -4747,6 +4801,7 @@ function Invoke-StartupSelfCheck {
                         $new = ($cur -band (-bnot $mask)) -bor ([System.IO.FileAttributes]($e.Attrs) -band $mask)
                     }
                     [System.IO.File]::SetAttributes($e.Path, $new)
+                    Notify-ShellPath $e.Path
                 } catch { Write-Log "恢复失败: $($e.Path)" 'ERROR' }
             }
             $paths = @($hiddenExisting | ForEach-Object { $_.Path })
@@ -4774,6 +4829,10 @@ function Invoke-StartupSelfCheck {
             $pad.prevHidden = $false
             Set-FolderHidden $pad.path | Out-Null
             Write-Log "对账修正: $($pad.path) 当前可见，已记录为转换前状态并重新隐藏"
+        } elseif ($script:HideWithSystem -and -not ($attrs -band [System.IO.FileAttributes]::System)) {
+            # 老版本只加了 Hidden：如果用户开了「显示隐藏项」，桌面上会留一个半透明的"虚"图标 —— 补上 System
+            Set-FolderHidden $pad.path | Out-Null
+            Write-Log "对账升级: $($pad.path) 补加 System 属性（避免桌面残留虚图标）"
         }
     }
 
@@ -4788,6 +4847,7 @@ function Invoke-StartupSelfCheck {
             $new = $cur -band (-bnot $mask)
             if ($e.Attrs -ge 0) { $new = ($cur -band (-bnot $mask)) -bor ([System.IO.FileAttributes]($e.Attrs) -band $mask) }
             [System.IO.File]::SetAttributes($e.Path, $new)
+            Notify-ShellPath $e.Path
             Write-Log "半完成转框已还原: $($e.Path)"
         } catch { }
     }
